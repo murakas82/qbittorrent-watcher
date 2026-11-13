@@ -106,7 +106,9 @@ settings alone.
   qBittorrent's list within about half a minute of finishing, as long as the
   watcher is running. The files stay; seeding stops. Only torrents the watcher
   added itself are removed, recognised by their torrent ID; a torrent you
-  added by hand is never touched, whatever it is called.
+  added by hand is never touched, whatever it is called. If you change a
+  series to another season while episodes are still downloading, those are
+  still removed when they finish.
 
 ## Running it without the window
 

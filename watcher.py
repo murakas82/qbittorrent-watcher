@@ -11,6 +11,7 @@ Usage:
     python watcher.py --remove-schedule    stop the hourly runs
 """
 
+import base64
 import json
 import os
 import re
@@ -235,25 +236,74 @@ def episode_pattern(show):
     )
 
 
-def in_client(qb, show):
-    """Return qBittorrent's torrent for the show's next episode, or None."""
+def find_episode(torrents, show):
+    """Return the torrents from the list that are the show's next episode."""
     tag = episode_pattern(show)
-    for torrent in qb.torrents():
+    matches = []
+    for torrent in torrents:
         title = normalize(torrent["name"])
         found = tag.search(title)
         if found and name_matches(show, title[: found.start()]):
-            return torrent
+            matches.append(torrent)
+    return matches
+
+
+def in_client(qb, show):
+    """Return qBittorrent's torrent for the show's next episode, or None."""
+    matches = find_episode(qb.torrents(), show)
+    return matches[0] if matches else None
+
+
+def magnet_hash(url):
+    """The torrent ID a magnet link names, as 40 lowercase hex digits, or None."""
+    found = re.search(r"xt=urn:btih:([A-Za-z0-9]+)", url)
+    if not found:
+        return None
+    value = found.group(1)
+    if len(value) == 40 and re.fullmatch(r"[0-9a-fA-F]+", value):
+        return value.lower()
+    if len(value) == 32:  # the same ID written in base32
+        try:
+            return base64.b32decode(value.upper()).hex()
+        except ValueError:
+            return None
     return None
 
 
-def wait_until_in_client(qb, show, seconds=45):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        torrent = in_client(qb, show)
-        if torrent:
-            return torrent
+ADD_WAIT_SECONDS = 45  # how long an added torrent gets to show up
+
+
+def wait_for_added(qb, row, show, known):
+    """Wait for the torrent just submitted to appear in qBittorrent.
+
+    Returns (torrent, ours). `ours` is True only when the torrent is certainly
+    the one the watcher submitted, and only then may its ID be recorded for
+    removal later. `known` holds the IDs that were in qBittorrent just before
+    the add, so a torrent somebody else added is never mistaken for it.
+
+    A magnet link names its torrent's ID, so that exact torrent is looked
+    for. A plugin download does not, so the watcher accepts a torrent of this
+    episode that was not there before; if two such torrents turn up at once
+    it cannot tell which is its own, and claims neither.
+    """
+    expected = magnet_hash(row.get("fileUrl", ""))
+    deadline = time.time() + ADD_WAIT_SECONDS
+    while True:
+        torrents = qb.torrents()
+        if expected:
+            for torrent in torrents:
+                if torrent.get("hash", "").lower() == expected:
+                    return torrent, expected not in known
+        fresh = [
+            torrent
+            for torrent in find_episode(torrents, show)
+            if torrent.get("hash", "").lower() not in known
+        ]
+        if fresh:
+            return fresh[0], len(fresh) == 1 and not expected
+        if time.time() >= deadline:
+            return None, False
         time.sleep(3)
-    return None
 
 
 def pick_candidates(results, show):
@@ -329,20 +379,27 @@ def remove_finished(qb, show, dry_run):
     by hand is never removed, whatever it is called. Only removes torrents
     that are 100% complete, and never deletes the downloaded files.
     """
+    # "cleanup" holds torrents from an earlier season of this entry that were
+    # still in qBittorrent when the season was changed in the window.
+    pending = show.get("cleanup", [])
     ours = {
-        item["hash"].lower(): item["episode"]
+        item["hash"].lower(): f"S{show['season']:02d}E{item['episode']:02d}"
         for item in show.get("history", [])
         if item.get("hash")
     }
+    ours.update({item["hash"].lower(): item.get("label", "") for item in pending})
     if not ours:
         return
+    in_qbittorrent = set()
+    removed = set()
     for torrent in qb.torrents():
-        episode = ours.get(torrent.get("hash", "").lower())
-        if episode is None:
+        torrent_hash = torrent.get("hash", "").lower()
+        in_qbittorrent.add(torrent_hash)
+        if torrent_hash not in ours:
             continue
         if torrent.get("progress", 0) < 1 or torrent.get("state") not in FINISHED_STATES:
             continue
-        label = f"{show['name']} S{show['season']:02d}E{episode:02d}"
+        label = f"{show['name']} {ours[torrent_hash]}".rstrip()
         if dry_run:
             log(f"{label}: finished, would remove from qBittorrent (files kept)")
         else:
@@ -352,6 +409,34 @@ def remove_finished(qb, show, dry_run):
                 post=True,
             )
             log(f"{label}: finished, removed from qBittorrent (files kept)")
+            removed.add(torrent_hash)
+
+    # Forget pending cleanups that are done. One whose torrent is simply not
+    # in qBittorrent is kept for a month before it is dropped: just after
+    # qBittorrent starts, its list can be incomplete for a moment, and a
+    # torrent missing from it has not necessarily gone.
+    month_ago = f"{datetime.fromtimestamp(time.time() - 30 * 86400):%Y-%m-%d}"
+    settled = {
+        item["hash"].lower()
+        for item in pending
+        if item["hash"].lower() in removed
+        or (
+            item["hash"].lower() not in in_qbittorrent
+            and item.get("since", "") < month_ago
+        )
+    }
+    if settled and not dry_run:
+
+        def forget(config):
+            for entry in config["series"]:
+                if same_series(entry, show) and entry.get("cleanup"):
+                    left = [c for c in entry["cleanup"] if c["hash"].lower() not in settled]
+                    if left:
+                        entry["cleanup"] = left
+                    else:
+                        del entry["cleanup"]
+
+        update_config(forget)
 
 
 def apply_download_limit(qb, limit):
@@ -645,6 +730,8 @@ def run_check(dry_run):
                 else:
                     # Try the best few in turn until one really shows up.
                     added = None
+                    ours = False  # is `added` certainly the torrent submitted here?
+                    appeared = None  # the episode turned up without the watcher adding it
                     edited = False
                     for row in candidates[:3]:
                         # A search can take over a minute, and each attempt
@@ -655,14 +742,24 @@ def run_check(dry_run):
                             break
                         summary = f"{row['fileName']} ({row.get('nbSeeders', 0)} seeders)"
                         try:
+                            # Look at what is in qBittorrent right now. If the
+                            # episode was added by hand during the search, leave
+                            # it at that. Otherwise remember what is there, so
+                            # only a torrent that is new can count as this add.
+                            present = qb.torrents()
+                            by_hand = find_episode(present, show)
+                            if by_hand:
+                                appeared = by_hand[0]
+                                break
+                            known = {t.get("hash", "").lower() for t in present}
                             qb.add(row, show.get("save_path", ""))
-                            added = wait_until_in_client(qb, show)
+                            added, ours = wait_for_added(qb, row, show, known)
                         except (urllib.error.URLError, OSError, ValueError) as error:
                             log(f"{label}: adding failed ({error})")
                         if added:
                             log(f"{label}: added {summary}")
                             folder = show.get("save_path", "")
-                            if folder:
+                            if folder and ours:
                                 # Set the folder after the add too, because
                                 # plugin downloads ignore it at add time.
                                 try:
@@ -676,10 +773,16 @@ def run_check(dry_run):
                         # series and stops, or carries on with the new settings.
                         log(f"{label}: series was changed in the window, not adding with the old settings")
                         continue
-                    if not added:
+                    if appeared:
+                        got_title = appeared["name"]
+                        log(f"{label}: appeared in qBittorrent during the search, not adding")
+                    elif not added:
                         break
-                    got_title = added["name"]
-                    got_hash = added.get("hash")
+                    else:
+                        got_title = added["name"]
+                        # Record the ID only when the torrent is certainly the
+                        # watcher's own; only recorded torrents are ever removed.
+                        got_hash = added.get("hash") if ours else None
 
             if not dry_run:
                 # Save after every episode so a crash never causes a duplicate.

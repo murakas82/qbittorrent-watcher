@@ -512,7 +512,21 @@ class App(tk.Tk):
             for entry in series:
                 if watcher.same_series(entry, old):
                     if entry["season"] != new["season"]:
-                        entry["history"] = []  # history belongs to the old season
+                        # The history belongs to the old season, but its
+                        # torrents may still be downloading. Keep their IDs so
+                        # they are still removed when they finish.
+                        still_ours = [
+                            {
+                                "hash": item["hash"],
+                                "label": f"S{entry['season']:02d}E{item['episode']:02d}",
+                                "since": f"{datetime.now():%Y-%m-%d}",
+                            }
+                            for item in entry.get("history", [])
+                            if item.get("hash")
+                        ]
+                        if still_ours:
+                            entry.setdefault("cleanup", []).extend(still_ours)
+                        entry["history"] = []
                     changes = dict(new)
                     if not episode_edited:
                         del changes["next_episode"]
