@@ -1,4 +1,4 @@
-"""Series watcher for qBittorrent.
+"""qBittorrent Watcher: downloads new episodes of the series you follow.
 
 Reads series.json, searches for the next episode of each series through
 qBittorrent's own search plugins (Web API), adds the best match, and then
@@ -28,7 +28,7 @@ CONFIG_FILE = HERE / "series.json"
 LOG_FILE = HERE / "watcher.log"
 LOCK_FILE = HERE / "watcher.lock"
 MAX_EPISODES_PER_RUN = 30  # safety cap when catching up on a season
-TASK_NAME = "qBittorrent Series Watcher"
+TASK_NAME = "qBittorrent Watcher"
 
 
 def log(message):
@@ -249,6 +249,37 @@ def remove_finished(qb, show, dry_run):
                 break
 
 
+def apply_download_limit(qb, limit):
+    """Make qBittorrent download at most `limit` torrents at a time.
+
+    This uses qBittorrent's own queue (Options > BitTorrent > Torrent
+    Queueing): torrents over the limit show as "Queued" and start by
+    themselves when a slot frees up. It applies to every download in
+    qBittorrent, not only watched series. A limit of 0 switches the queue off.
+    Returns True if a qBittorrent setting was changed.
+    """
+    prefs = json.loads(qb.call("app/preferences"))
+    wanted = {}
+    if limit <= 0:
+        if prefs.get("queueing_enabled"):
+            wanted["queueing_enabled"] = False
+    else:
+        if not prefs.get("queueing_enabled"):
+            # Switching the queue on also activates qBittorrent's limits on
+            # seeding and on total active torrents; leave those unlimited so
+            # only the number of downloads changes.
+            wanted.update(
+                queueing_enabled=True, max_active_uploads=-1, max_active_torrents=-1
+            )
+        elif 0 <= prefs.get("max_active_torrents", -1) < limit:
+            wanted["max_active_torrents"] = limit
+        if prefs.get("max_active_downloads") != limit:
+            wanted["max_active_downloads"] = limit
+    if wanted:
+        qb.call("app/setPreferences", {"json": json.dumps(wanted)}, post=True)
+    return bool(wanted)
+
+
 def load_config():
     """Read series.json; a missing file means an empty list with defaults."""
     config = {
@@ -377,6 +408,20 @@ def run_check(dry_run):
     except (urllib.error.URLError, OSError) as error:
         log(f"Could not reach qBittorrent ({error}). Is it running with Web UI on?")
         return 1
+
+    # Only present once the setting has been used; until then qBittorrent's
+    # own queue settings are left alone.
+    if "max_downloads" in config and not dry_run:
+        limit = config["max_downloads"]
+        try:
+            if apply_download_limit(qb, limit):
+                log(
+                    f"qBittorrent now downloads {limit} at a time"
+                    if limit > 0
+                    else "qBittorrent download limit switched off"
+                )
+        except (urllib.error.URLError, OSError, ValueError, TypeError) as error:
+            log(f"Could not set the download limit ({error})")
 
     for show in config["series"]:
         if not show.get("enabled", True):

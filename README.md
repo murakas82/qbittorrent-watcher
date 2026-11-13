@@ -1,4 +1,4 @@
-# qBittorrent Series Watcher
+# qBittorrent Watcher
 
 A small tool that watches for new episodes of the series you follow and adds
 them to qBittorrent automatically.
@@ -17,6 +17,7 @@ It is two Python files with no dependencies beyond Python itself.
 - Remembers every episode it has downloaded, so deleting the files or the
   torrent never causes a second download.
 - Optionally removes finished torrents from qBittorrent (the files are kept).
+- Can limit how many downloads run at a time; the rest wait in a queue.
 - Has a window for managing the list, so you never have to edit a file.
 
 ## Requirements
@@ -70,6 +71,18 @@ window open.
 
 The *Downloaded episodes* tab lists what the watcher has got for the selected
 series. The *Activity* tab shows the log.
+
+### Downloads at a time
+
+The box at the top right sets how many torrents qBittorrent downloads at once.
+With it set to 2, two episodes download and the rest wait as *Queued* in
+qBittorrent; each time one finishes, the next starts by itself.
+
+This switches on qBittorrent's own queue (Options > BitTorrent > Torrent
+Queueing), so it applies to every download in qBittorrent, not only watched
+series. Seeding is left unlimited. Set the box to 0 to switch the queue off.
+As long as you never touch the box, the watcher leaves qBittorrent's queue
+settings alone.
 
 ### Series settings
 

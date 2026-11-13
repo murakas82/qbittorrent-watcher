@@ -1,4 +1,4 @@
-"""Window for managing the series watcher.
+"""qBittorrent Watcher: the window for managing the watch list.
 
 Shows the series in series.json, lets you add, edit, pause and remove them,
 lists the episodes already downloaded, and can start a check right away.
@@ -35,7 +35,8 @@ CHECK_EVERY = 3600  # seconds between automatic checks while qBittorrent runs
 POLL_EVERY = 5  # seconds between looks for qBittorrent
 INSTANCE_PORT = 47821  # local port used to keep a single window running
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-RUN_NAME = "qBittorrent Series Watcher"
+RUN_NAME = "qBittorrent Watcher"
+OLD_RUN_NAME = "qBittorrent Series Watcher"  # the program's earlier name
 QUALITIES = ["Any", "2160p", "1080p", "720p", "480p"]
 DEFAULT_SKIP = "CAM, HDCAM, TELESYNC, HDTS"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -190,6 +191,10 @@ def set_autostart(on):
         python = Path(sys.executable)
     command = f'"{python}" "{Path(__file__).resolve()}" --background'
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        try:
+            winreg.DeleteValue(key, OLD_RUN_NAME)
+        except FileNotFoundError:
+            pass
         if on:
             winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, command)
         else:
@@ -204,7 +209,7 @@ class App(tk.Tk):
         """background: start hidden. standalone=False (tests) skips autostart,
         the single-instance listener and the qBittorrent monitor."""
         super().__init__()
-        self.title("Series Watcher")
+        self.title("qBittorrent Watcher")
         self.scale = self.winfo_fpixels("1i") / 96
         self.geometry(f"{self.px(900)}x{self.px(600)}")
         self.minsize(self.px(700), self.px(450))
@@ -224,6 +229,22 @@ class App(tk.Tk):
         self.remove_button.pack(side="left", padx=(6, 0))
         self.check_button = ttk.Button(toolbar, text="Check now", command=self.check_now)
         self.check_button.pack(side="right")
+        self.saved_limit = 0
+        self.max_downloads = tk.StringVar(value="0")
+        self.limit_box = ttk.Spinbox(
+            toolbar,
+            from_=0,
+            to=20,
+            width=3,
+            textvariable=self.max_downloads,
+            command=self.limit_changed,
+        )
+        self.limit_box.pack(side="right", padx=(0, 16))
+        self.limit_box.bind("<Return>", self.limit_changed)
+        self.limit_box.bind("<FocusOut>", self.limit_changed)
+        ttk.Label(toolbar, text="Downloads at a time (0 = no limit)").pack(
+            side="right", padx=(0, 6)
+        )
 
         self.qb_online = None  # None until the first look, then True or False
         self.last_check = 0.0
@@ -347,7 +368,11 @@ class App(tk.Tk):
         if force or mtime != self.config_mtime:
             self.config_mtime = mtime
             try:
-                self.shows = watcher.load_config()["series"] if mtime else []
+                config = watcher.load_config() if mtime else {"series": []}
+                self.shows = config["series"]
+                self.saved_limit = int(config.get("max_downloads", 0))
+                if not self.editing_limit():
+                    self.max_downloads.set(str(self.saved_limit))
             except (OSError, ValueError) as error:
                 self.shows = []
                 self.status.set(f"Could not read series.json: {error}")
@@ -419,13 +444,13 @@ class App(tk.Tk):
         except FileNotFoundError:
             config = {"qbittorrent_url": "http://127.0.0.1:8080", "series": []}
         except (OSError, ValueError) as error:
-            messagebox.showerror("Series Watcher", f"Could not read series.json:\n{error}", parent=self)
+            messagebox.showerror("qBittorrent Watcher", f"Could not read series.json:\n{error}", parent=self)
             return
         edit(config["series"])
         try:
             watcher.save_config(config)
         except OSError as error:
-            messagebox.showerror("Series Watcher", f"Could not save series.json:\n{error}", parent=self)
+            messagebox.showerror("qBittorrent Watcher", f"Could not save series.json:\n{error}", parent=self)
         self.refresh(force=True)
 
     # ---- actions --------------------------------------------------------
@@ -438,7 +463,7 @@ class App(tk.Tk):
             return
         if any(watcher.same_series(new, show) for show in self.shows):
             messagebox.showinfo(
-                "Series Watcher",
+                "qBittorrent Watcher",
                 f"{new['name']} season {new['season']} is already in the list.",
                 parent=self,
             )
@@ -460,7 +485,7 @@ class App(tk.Tk):
             watcher.same_series(new, show) for show in self.shows
         ):
             messagebox.showinfo(
-                "Series Watcher",
+                "qBittorrent Watcher",
                 f"{new['name']} season {new['season']} is already in the list.",
                 parent=self,
             )
@@ -505,6 +530,39 @@ class App(tk.Tk):
                 slice(None), [e for e in series if not watcher.same_series(e, old)]
             )
         )
+
+    def editing_limit(self):
+        try:
+            return self.focus_get() is self.limit_box
+        except KeyError:
+            return False
+
+    def limit_changed(self, event=None):
+        """Save the downloads-at-a-time setting and pass it to qBittorrent."""
+        try:
+            limit = max(0, min(20, int(self.max_downloads.get())))
+        except ValueError:
+            limit = self.saved_limit
+        self.max_downloads.set(str(limit))
+        if limit == self.saved_limit:
+            return
+        try:
+            config = watcher.load_config()
+            config["max_downloads"] = limit
+            watcher.save_config(config)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("qBittorrent Watcher", f"Could not save the setting:\n{error}", parent=self)
+            return
+        self.saved_limit = limit
+        url = config.get("qbittorrent_url", "")
+
+        def work():
+            try:
+                watcher.apply_download_limit(watcher.QBittorrent(url), limit)
+            except (urllib.error.URLError, OSError, ValueError):
+                pass  # qBittorrent is closed; the next check applies it
+
+        threading.Thread(target=work, daemon=True).start()
 
     def check_now(self):
         if self.checking:
@@ -606,7 +664,7 @@ class App(tk.Tk):
         try:
             set_autostart(wanted)
         except OSError as error:
-            messagebox.showerror("Series Watcher", f"Could not change the setting:\n{error}", parent=self)
+            messagebox.showerror("qBittorrent Watcher", f"Could not change the setting:\n{error}", parent=self)
             self.autostart.set(not wanted)
             return
         self.remember_autostart(wanted)
