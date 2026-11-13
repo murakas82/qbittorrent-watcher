@@ -86,9 +86,16 @@ settings alone.
 
 ### Series settings
 
-- **Series name** – as it appears in torrent names. Capitals, spaces and
-  punctuation do not matter (`example show` finds `ExampleShow`), but real spelling
-  mistakes find nothing.
+- **Series name** – the title as it appears in torrent names. Capitals, spaces
+  and punctuation do not matter (`example show` finds `ExampleShow`), but real
+  spelling mistakes find nothing. The release title has to be this name and
+  nothing more, apart from a leading "The" and a year or country tag after it
+  (`Example Show 2024`, `Example Show US`). So `You` does not pick up
+  `Young Sheldon`.
+- **Name is only part of a longer title** – tick this if you typed a short
+  form and releases use a longer title that contains it, for example a
+  subtitle on its own. The name then matches as a run of whole words anywhere
+  in the title. This is looser, so prefer the full title when you can.
 - **Next episode to get** – earlier episodes are never downloaded. Lower this
   number if you want an old episode again.
 - **Quality** – a word that must be in the release name, such as `1080p`.
@@ -97,7 +104,9 @@ settings alone.
 - **Download folder** – leave empty to use qBittorrent's default folder.
 - **Remove from qBittorrent when finished** – takes completed episodes out of
   qBittorrent's list within about half a minute of finishing, as long as the
-  watcher is running. The files stay; seeding stops.
+  watcher is running. The files stay; seeding stops. Only torrents the watcher
+  added itself are removed, recognised by their torrent ID; a torrent you
+  added by hand is never touched, whatever it is called.
 
 ## Running it without the window
 
@@ -118,13 +127,14 @@ python watcher.py --remove-schedule
 ## How it decides
 
 For each series the watcher searches for `Name SxxEyy`. A result is accepted
-when the series name comes before the episode number in the release name, the
-quality word is present, none of the skip words are present, and it has enough
+when the title before the episode number is the series name, the quality word
+is present, none of the skip words are present, and it has enough
 seeders. Among those it takes the one with the most seeders, then checks that
 the torrent really appeared in qBittorrent before counting the episode as done.
 
 It works through episodes in order. If an episode cannot be found, it waits
-for that episode and does not skip ahead. Season packs are ignored, and moving
+for that episode and does not skip ahead. Pausing, removing or editing a
+series in the window takes effect straight away, even in the middle of a check. Season packs are ignored, and moving
 to the next season is something you do yourself in *Edit…*.
 
 ## Files

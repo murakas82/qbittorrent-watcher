@@ -12,6 +12,7 @@
       "save_path": "",
       "enabled": true,
       "remove_when_done": false,
+      "part_of_title": false,
       "history": []
     }
   ]

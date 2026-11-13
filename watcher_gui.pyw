@@ -83,6 +83,7 @@ class SeriesDialog(tk.Toplevel):
         self.enabled = tk.BooleanVar(value=show.get("enabled", True))
         # New series get this switched on; existing ones keep their setting.
         self.remove_done = tk.BooleanVar(value=show.get("remove_when_done", not show))
+        self.part_of_title = tk.BooleanVar(value=show.get("part_of_title", False))
 
         form = ttk.Frame(self, padding=16)
         form.grid(sticky="nsew")
@@ -133,8 +134,19 @@ class SeriesDialog(tk.Toplevel):
             variable=self.remove_done,
         ).grid(row=15, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
 
+        ttk.Checkbutton(
+            form,
+            text="Name is only part of a longer title",
+            variable=self.part_of_title,
+        ).grid(row=16, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+        ttk.Label(
+            form,
+            text="Tick if releases use a longer title that contains this name",
+            foreground="#666",
+        ).grid(row=17, column=1, sticky="w", padx=(32, 0))
+
         buttons = ttk.Frame(form)
-        buttons.grid(row=16, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        buttons.grid(row=18, column=0, columnspan=2, sticky="e", pady=(16, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(buttons, text="Save", command=self.save, default="active").grid(row=0, column=1)
 
@@ -179,6 +191,7 @@ class SeriesDialog(tk.Toplevel):
             "save_path": self.folder.get().strip(),
             "enabled": self.enabled.get(),
             "remove_when_done": self.remove_done.get(),
+            "part_of_title": self.part_of_title.get(),
         }
         self.destroy()
 
@@ -439,18 +452,14 @@ class App(tk.Tk):
                 )
 
     def change(self, edit):
-        """Apply edit(series_list) to a fresh copy of series.json and save it."""
+        """Apply edit(series_list) to series.json.
+
+        Goes through watcher.update_config, which re-reads the file and saves
+        under a lock, so a check running at the same time loses nothing.
+        """
         try:
-            config = watcher.load_config()
-        except FileNotFoundError:
-            config = {"qbittorrent_url": "http://127.0.0.1:8080", "series": []}
+            watcher.update_config(lambda config: edit(config["series"]))
         except (OSError, ValueError) as error:
-            messagebox.showerror("qBittorrent Watcher", f"Could not read series.json:\n{error}", parent=self)
-            return
-        edit(config["series"])
-        try:
-            watcher.save_config(config)
-        except OSError as error:
             messagebox.showerror("qBittorrent Watcher", f"Could not save series.json:\n{error}", parent=self)
         self.refresh(force=True)
 
@@ -492,12 +501,22 @@ class App(tk.Tk):
             )
             return
 
+        # The dialog shows the next episode as it was when it opened. A check
+        # may have moved it on since, so only write it back if the user
+        # changed it (or changed the season, which starts a new count).
+        episode_edited = (
+            new["next_episode"] != old["next_episode"] or new["season"] != old["season"]
+        )
+
         def apply(series):
             for entry in series:
                 if watcher.same_series(entry, old):
                     if entry["season"] != new["season"]:
                         entry["history"] = []  # history belongs to the old season
-                    entry.update(new)
+                    changes = dict(new)
+                    if not episode_edited:
+                        del changes["next_episode"]
+                    entry.update(changes)
 
         self.change(apply)
         if self.table.exists(series_key(new)):
@@ -548,9 +567,9 @@ class App(tk.Tk):
         if limit == self.saved_limit:
             return
         try:
-            config = watcher.load_config()
-            config["max_downloads"] = limit
-            watcher.save_config(config)
+            config = watcher.update_config(
+                lambda config: config.__setitem__("max_downloads", limit)
+            )
         except (OSError, ValueError) as error:
             messagebox.showerror("qBittorrent Watcher", f"Could not save the setting:\n{error}", parent=self)
             return
@@ -631,8 +650,9 @@ class App(tk.Tk):
 
             # Take finished episodes out of qBittorrent soon after they
             # complete, instead of leaving them until the next hourly check.
-            # Skipped while a check runs, since the check does this itself.
-            if reachable and not self.checking and time.time() - last_tidy >= TIDY_EVERY:
+            # This keeps going while a check runs: a long catch-up would
+            # otherwise hold removals back, and removing twice is harmless.
+            if reachable and time.time() - last_tidy >= TIDY_EVERY:
                 last_tidy = time.time()
                 for show in config["series"]:
                     if show.get("enabled", True) and show.get("remove_when_done"):
@@ -687,9 +707,7 @@ class App(tk.Tk):
 
     def remember_autostart(self, wanted):
         try:
-            config = watcher.load_config()
-            config["autostart"] = wanted
-            watcher.save_config(config)
+            watcher.update_config(lambda config: config.__setitem__("autostart", wanted))
         except (OSError, ValueError):
             pass
 
