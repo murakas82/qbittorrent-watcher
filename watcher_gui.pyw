@@ -33,6 +33,7 @@ import watcher
 
 CHECK_EVERY = 3600  # seconds between automatic checks while qBittorrent runs
 POLL_EVERY = 5  # seconds between looks for qBittorrent
+TIDY_EVERY = 30  # seconds between removals of finished torrents
 INSTANCE_PORT = 47821  # local port used to keep a single window running
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "qBittorrent Watcher"
@@ -614,16 +615,31 @@ class App(tk.Tk):
 
     def monitor(self):
         """Background thread: keep asking whether qBittorrent is reachable."""
+        last_tidy = 0.0
         while True:
+            reachable = False
             try:
-                url = watcher.load_config().get("qbittorrent_url", "")
-                watcher.QBittorrent(url).call("app/version", timeout=3)
-                online = True
+                config = watcher.load_config()
+                qb = watcher.QBittorrent(config.get("qbittorrent_url", ""))
+                qb.call("app/version", timeout=3)
+                online = reachable = True
             except urllib.error.HTTPError:
                 online = True  # running but refusing us; the check will log why
             except (urllib.error.URLError, OSError, ValueError):
                 online = False
             self.results.put(lambda online=online: self.qbittorrent_seen(online))
+
+            # Take finished episodes out of qBittorrent soon after they
+            # complete, instead of leaving them until the next hourly check.
+            # Skipped while a check runs, since the check does this itself.
+            if reachable and not self.checking and time.time() - last_tidy >= TIDY_EVERY:
+                last_tidy = time.time()
+                for show in config["series"]:
+                    if show.get("enabled", True) and show.get("remove_when_done"):
+                        try:
+                            watcher.remove_finished(qb, show, dry_run=False)
+                        except (urllib.error.URLError, OSError, ValueError, KeyError):
+                            break
             time.sleep(POLL_EVERY)
 
     def qbittorrent_seen(self, online):

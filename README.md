@@ -96,7 +96,8 @@ settings alone.
 - **Skip releases with** – words that rule a release out, such as `CAM`.
 - **Download folder** – leave empty to use qBittorrent's default folder.
 - **Remove from qBittorrent when finished** – takes completed episodes out of
-  qBittorrent's list at the next check. The files stay; seeding stops.
+  qBittorrent's list within about half a minute of finishing, as long as the
+  watcher is running. The files stay; seeding stops.
 
 ## Running it without the window
 
