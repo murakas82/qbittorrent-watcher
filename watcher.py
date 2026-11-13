@@ -26,6 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CONFIG_FILE = HERE / "series.json"
 LOG_FILE = HERE / "watcher.log"
+LOCK_FILE = HERE / "watcher.lock"
 MAX_EPISODES_PER_RUN = 30  # safety cap when catching up on a season
 TASK_NAME = "qBittorrent Series Watcher"
 
@@ -41,14 +42,14 @@ class QBittorrent:
     def __init__(self, base_url):
         self.base = base_url.rstrip("/") + "/api/v2/"
 
-    def call(self, endpoint, params=None, post=False):
+    def call(self, endpoint, params=None, post=False, timeout=30):
         data = urllib.parse.urlencode(params or {})
         url = self.base + endpoint
         if post:
             request = urllib.request.Request(url, data=data.encode("utf-8"))
         else:
             request = urllib.request.Request(url + ("?" + data if data else ""))
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8", errors="replace")
 
     def search(self, pattern, timeout):
@@ -331,6 +332,30 @@ def main():
     if "--remove-schedule" in sys.argv:
         return remove_schedule()
     dry_run = "--dry-run" in sys.argv
+    if not acquire_lock():
+        print("Another check is already running.")
+        return 0
+    try:
+        return run_check(dry_run)
+    finally:
+        LOCK_FILE.unlink(missing_ok=True)
+
+
+def acquire_lock():
+    """Allow one check at a time, so two runs can never add the same episode."""
+    try:
+        if time.time() - LOCK_FILE.stat().st_mtime > 1800:
+            LOCK_FILE.unlink()  # left behind by a run that was killed
+    except OSError:
+        pass
+    try:
+        os.close(os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except FileExistsError:
+        return False
+
+
+def run_check(dry_run):
     config = load_config()
     if not config["series"]:
         print("No series to watch yet. Open watcher_gui.pyw and click 'Add series…'.")

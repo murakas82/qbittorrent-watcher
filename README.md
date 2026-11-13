@@ -10,7 +10,8 @@ It is two Python files with no dependencies beyond Python itself.
 ## What it does
 
 - Keeps a list of series, each with a season and the next episode to get.
-- Every hour, searches for that episode through qBittorrent's search plugins.
+- Opens together with qBittorrent, checks straight away and then every hour,
+  searching for that episode through qBittorrent's search plugins.
 - Picks the release with the most seeders that matches your quality, and adds it.
 - Moves on to the following episode, and catches up on several at once if needed.
 - Remembers every episode it has downloaded, so deleting the files or the
@@ -20,8 +21,8 @@ It is two Python files with no dependencies beyond Python itself.
 
 ## Requirements
 
-- Windows 10 or 11. The watcher itself is plain Python, but the hourly
-  schedule and the window have only been used on Windows.
+- Windows 10 or 11. The watcher itself is plain Python, but starting with
+  Windows and the window have only been used on Windows.
 - [Python 3.9 or newer](https://www.python.org/downloads/), installed with the
   default options (this includes the window toolkit).
 - qBittorrent 5.x with at least one search plugin installed and working in the
@@ -44,19 +45,18 @@ It is two Python files with no dependencies beyond Python itself.
    *Add series…* and fill in the series name, season and the next episode you
    need.
 
-4. **Turn on the hourly check.** Open a terminal in the folder and run:
+That is all. From the first time you open the window, the watcher looks after
+itself:
 
-   ```
-   python watcher.py --install-schedule
-   ```
+- It starts with Windows and waits out of sight.
+- When qBittorrent opens, the window appears and a check runs straight away.
+- While qBittorrent is running, it checks again every hour.
+- When qBittorrent closes, the window hides again.
 
-   To turn it off again:
-
-   ```
-   python watcher.py --remove-schedule
-   ```
-
-qBittorrent has to be running for a check to do anything.
+Closing the window with the X only hides it. To switch all of this off, untick
+*Start with Windows and open with qBittorrent* at the bottom of the window;
+after that the X closes the program, and checks only happen while you have the
+window open.
 
 ## Using the window
 
@@ -85,11 +85,20 @@ series. The *Activity* tab shows the log.
 - **Remove from qBittorrent when finished** – takes completed episodes out of
   qBittorrent's list at the next check. The files stay; seeding stops.
 
-## Running it by hand
+## Running it without the window
 
 ```
 python watcher.py            search and add new episodes
 python watcher.py --dry-run  show what would be added, add nothing
+```
+
+If you would rather not keep the window program running, untick *Start with
+Windows and open with qBittorrent* and let Windows Task Scheduler run the
+watcher every hour instead:
+
+```
+python watcher.py --install-schedule
+python watcher.py --remove-schedule
 ```
 
 ## How it decides

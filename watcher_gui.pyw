@@ -3,21 +3,39 @@
 Shows the series in series.json, lets you add, edit, pause and remove them,
 lists the episodes already downloaded, and can start a check right away.
 Double-click this file to open it.
+
+The window also does the automatic checking: it notices when qBittorrent
+opens, checks straight away, and checks again every hour while qBittorrent
+is running. With "Start with Windows" ticked it starts hidden at sign-in
+(--background) and closing the window only hides it.
 """
 
 import ctypes
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
+import urllib.error
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    import winreg  # Windows only; used for "start with Windows"
+except ImportError:
+    winreg = None
+
 import watcher
 
-TASK_NAME = watcher.TASK_NAME
+CHECK_EVERY = 3600  # seconds between automatic checks while qBittorrent runs
+POLL_EVERY = 5  # seconds between looks for qBittorrent
+INSTANCE_PORT = 47821  # local port used to keep a single window running
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "qBittorrent Series Watcher"
 QUALITIES = ["Any", "2160p", "1080p", "720p", "480p"]
 DEFAULT_SKIP = "CAM, HDCAM, TELESYNC, HDTS"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -163,8 +181,28 @@ class SeriesDialog(tk.Toplevel):
         self.destroy()
 
 
+def set_autostart(on):
+    """Add or remove the watcher from the programs Windows starts at sign-in."""
+    if winreg is None:
+        return
+    python = Path(sys.executable).with_name("pythonw.exe")
+    if not python.exists():
+        python = Path(sys.executable)
+    command = f'"{python}" "{Path(__file__).resolve()}" --background'
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        if on:
+            winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, command)
+        else:
+            try:
+                winreg.DeleteValue(key, RUN_NAME)
+            except FileNotFoundError:
+                pass
+
+
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(self, background=False, standalone=True):
+        """background: start hidden. standalone=False (tests) skips autostart,
+        the single-instance listener and the qBittorrent monitor."""
         super().__init__()
         self.title("Series Watcher")
         self.scale = self.winfo_fpixels("1i") / 96
@@ -187,10 +225,19 @@ class App(tk.Tk):
         self.check_button = ttk.Button(toolbar, text="Check now", command=self.check_now)
         self.check_button.pack(side="right")
 
+        self.qb_online = None  # None until the first look, then True or False
+        self.last_check = 0.0
+        self.autostart = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self.status, padding=(12, 4), foreground="#555").pack(
-            side="bottom", fill="x"
-        )
+        bottom = ttk.Frame(self, padding=(12, 4))
+        bottom.pack(side="bottom", fill="x")
+        ttk.Label(bottom, textvariable=self.status, foreground="#555").pack(side="left")
+        ttk.Checkbutton(
+            bottom,
+            text="Start with Windows and open with qBittorrent",
+            variable=self.autostart,
+            command=self.autostart_changed,
+        ).pack(side="right")
 
         panes = ttk.PanedWindow(self, orient="vertical")
         panes.pack(fill="both", expand=True, padx=12, pady=(0, 4))
@@ -224,13 +271,41 @@ class App(tk.Tk):
         self.log_text.pack(fill="both", expand=True)
         lower.add(log_frame, text="Activity")
 
-        self.schedule_text = ""
         # Background threads must not touch the window; they queue work here.
         self.results = queue.Queue()
         self.refresh(force=True)
         self.pump()
         self.poll()
-        self.update_schedule()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        if background:
+            self.withdraw()
+        if standalone:
+            self.start_background_work()
+
+    def start_background_work(self):
+        """Autostart, the single-instance listener and the qBittorrent monitor."""
+        try:
+            config = watcher.load_config()
+        except (OSError, ValueError):
+            config = {}
+        # On the very first start, switch autostart on; after that, respect it.
+        wanted = config.get("autostart", True)
+        try:
+            set_autostart(wanted)  # also refreshes the path if the folder moved
+        except OSError:
+            wanted = False
+        self.autostart.set(wanted)
+        if "autostart" not in config:
+            self.remember_autostart(wanted)
+
+        try:
+            server = socket.socket()
+            server.bind(("127.0.0.1", INSTANCE_PORT))
+            server.listen(5)
+            threading.Thread(target=self.listen, args=(server,), daemon=True).start()
+        except OSError:
+            pass
+        threading.Thread(target=self.monitor, daemon=True).start()
 
     def px(self, value):
         return int(value * self.scale)
@@ -435,6 +510,7 @@ class App(tk.Tk):
         if self.checking:
             return
         self.checking = True
+        self.last_check = time.time()
         self.check_button.configure(state="disabled", text="Checking…")
         self.show_status()
 
@@ -467,7 +543,81 @@ class App(tk.Tk):
     # ---- background updates ----------------------------------------------
 
     def show_status(self):
-        self.status.set("Checking for new episodes…" if self.checking else self.schedule_text)
+        if self.checking:
+            text = "Checking for new episodes…"
+        elif self.qb_online:
+            due = datetime.fromtimestamp(self.last_check + CHECK_EVERY)
+            text = f"qBittorrent is running. Next automatic check at {due:%H:%M}."
+        elif self.qb_online is False:
+            text = "qBittorrent is not running. A check starts as soon as it opens."
+        else:
+            text = ""
+        self.status.set(text)
+
+    def monitor(self):
+        """Background thread: keep asking whether qBittorrent is reachable."""
+        while True:
+            try:
+                url = watcher.load_config().get("qbittorrent_url", "")
+                watcher.QBittorrent(url).call("app/version", timeout=3)
+                online = True
+            except urllib.error.HTTPError:
+                online = True  # running but refusing us; the check will log why
+            except (urllib.error.URLError, OSError, ValueError):
+                online = False
+            self.results.put(lambda online=online: self.qbittorrent_seen(online))
+            time.sleep(POLL_EVERY)
+
+    def qbittorrent_seen(self, online):
+        was_online = self.qb_online
+        self.qb_online = online
+        if online and not was_online:
+            # qBittorrent has just opened (or the watcher has): show and check.
+            self.show_window()
+            self.check_now()
+        elif online and time.time() - self.last_check >= CHECK_EVERY:
+            self.check_now()
+        elif was_online and not online and self.autostart.get():
+            self.withdraw()  # qBittorrent closed; wait out of sight
+        self.show_status()
+
+    def show_window(self):
+        self.deiconify()
+        self.lift()
+
+    def listen(self, server):
+        """Background thread: a second launch asks this one to show itself."""
+        while True:
+            try:
+                connection, _ = server.accept()
+                connection.close()
+            except OSError:
+                return
+            self.results.put(self.show_window)
+
+    def on_close(self):
+        if self.autostart.get():
+            self.withdraw()  # keep watching in the background
+        else:
+            self.destroy()
+
+    def autostart_changed(self):
+        wanted = self.autostart.get()
+        try:
+            set_autostart(wanted)
+        except OSError as error:
+            messagebox.showerror("Series Watcher", f"Could not change the setting:\n{error}", parent=self)
+            self.autostart.set(not wanted)
+            return
+        self.remember_autostart(wanted)
+
+    def remember_autostart(self, wanted):
+        try:
+            config = watcher.load_config()
+            config["autostart"] = wanted
+            watcher.save_config(config)
+        except (OSError, ValueError):
+            pass
 
     def pump(self):
         """Run whatever the background threads have finished."""
@@ -482,45 +632,21 @@ class App(tk.Tk):
         self.refresh()
         self.after(2000, self.poll)
 
-    def update_schedule(self):
-        """Ask Windows when the hourly task runs next, without blocking."""
 
-        def work():
-            command = (
-                f"$t = Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction Stop; "
-                "$n = ($t | Get-ScheduledTaskInfo).NextRunTime; "
-                "if ($t.State -eq 'Disabled' -or -not $n) { 'off' } else { $n.ToString('HH:mm') }"
-            )
-            try:
-                done = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", command],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    creationflags=NO_WINDOW,
-                )
-                answer = done.stdout.strip() if done.returncode == 0 else ""
-            except (OSError, subprocess.SubprocessError):
-                answer = ""
-            if answer == "off":
-                text = "Automatic hourly check is switched off in Task Scheduler."
-            elif answer:
-                text = f"Next automatic check at {answer}. qBittorrent must be running."
-            else:
-                text = "No automatic check is scheduled. Use Check now."
-            self.results.put(lambda: self.set_schedule(text))
-
-        threading.Thread(target=work, daemon=True).start()
-        self.after(120000, self.update_schedule)
-
-    def set_schedule(self, text):
-        self.schedule_text = text
-        self.show_status()
+def already_running():
+    """If another watcher window is running, ask it to show itself."""
+    try:
+        socket.create_connection(("127.0.0.1", INSTANCE_PORT), timeout=1).close()
+        return True
+    except OSError:
+        return False
 
 
 if __name__ == "__main__":
+    if already_running():
+        sys.exit(0)
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled screens
     except (AttributeError, OSError):
         pass
-    App().mainloop()
+    App(background="--background" in sys.argv).mainloop()

@@ -2,6 +2,7 @@
 series.json
 series.json.tmp
 watcher.log
+watcher.lock
 
 __pycache__/
 *.pyc
