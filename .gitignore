@@ -1,0 +1,7 @@
+# Your own watch list, history and log stay on your computer.
+series.json
+series.json.tmp
+watcher.log
+
+__pycache__/
+*.pyc

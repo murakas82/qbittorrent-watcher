@@ -1,0 +1,18 @@
+{
+  "qbittorrent_url": "http://127.0.0.1:8080",
+  "search_timeout_seconds": 90,
+  "series": [
+    {
+      "name": "Example Show",
+      "season": 1,
+      "next_episode": 1,
+      "quality": "1080p",
+      "min_seeders": 3,
+      "must_not_contain": ["CAM", "HDCAM", "TELESYNC", "HDTS"],
+      "save_path": "",
+      "enabled": true,
+      "remove_when_done": false,
+      "history": []
+    }
+  ]
+}
