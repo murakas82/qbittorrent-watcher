@@ -5,7 +5,7 @@ them to qBittorrent automatically.
 
 It searches through the search plugins you already have in qBittorrent's
 Search tab, so there are no indexers, RSS feeds or extra services to set up.
-It is two Python files with no dependencies beyond Python itself.
+It uses Python's standard library, with no extra dependencies to install.
 
 ## What it does
 
@@ -70,7 +70,10 @@ window open.
 | Check now | Runs a search immediately instead of waiting for the hourly run. |
 
 The *Downloaded episodes* tab lists what the watcher has got for the selected
-series. The *Activity* tab shows the log.
+series across all seasons, including replacement downloads. The table's
+*Downloaded* column shows episodes from the current season. The *Activity* tab
+shows the log.
+Dates in both tabs use `DD.MM.YYYY`, followed by the recorded time when present.
 
 ### Downloads at a time
 
@@ -110,12 +113,20 @@ settings alone.
   series to another season while episodes are still downloading, those are
   still removed when they finish.
 
+Automatic moving and removal require a verified torrent hash. When a search
+plugin returns an HTTP link without that identity, the watcher waits for the
+full release title to appear and records it without claiming ownership. Such
+downloads use qBittorrent's default folder and stay in its list when finished.
+
 ## Running it without the window
 
 ```
 python watcher.py            search and add new episodes
 python watcher.py --dry-run  show what would be added, add nothing
 ```
+
+Use `--config path/to/series.json` to select another watch list, for example
+when testing. By default both entry points use `series.json` beside the program.
 
 If you would rather not keep the window program running, untick *Start with
 Windows and open with qBittorrent* and let Windows Task Scheduler run the
@@ -124,6 +135,13 @@ watcher every hour instead:
 ```
 python watcher.py --install-schedule
 python watcher.py --remove-schedule
+```
+
+Include `--config` when installing a task for another watch list. The task
+stores its absolute path, including when you supply a relative path:
+
+```
+python watcher.py --config "watch lists/series.json" --install-schedule
 ```
 
 ## How it decides
@@ -136,18 +154,53 @@ the torrent really appeared in qBittorrent before counting the episode as done.
 
 It works through episodes in order. If an episode cannot be found, it waits
 for that episode and does not skip ahead. Pausing, removing or editing a
-series in the window takes effect straight away, even in the middle of a check. Season packs are ignored, and moving
-to the next season is something you do yourself in *Edit…*.
+series in the window takes effect during a check, before the next addition.
+An addition already submitted to qBittorrent is still recorded. Season packs
+are ignored, and moving to the next season is something you do yourself in
+*Edit…*.
+
+Watch entries have stable IDs. Download records keep their own season,
+episode and torrent identity, so renaming a series or changing its season
+preserves history and pending cleanup. Removing a watch entry forgets its
+records, as described in the window's confirmation message.
+
+## Upgrading an existing watch list
+
+Close any old watcher window and let an ongoing check finish before replacing
+the program files. The first run upgrades `series.json` to schema version 2
+under the storage lock. It first saves an exact copy of the old file as
+`series.json.v1.bak` (using a unique suffix if that backup already exists).
+Settings, history and pending cleanup records are carried over automatically.
+Keep the backup if you need to return to an older version of the program.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `watcher.py` | The watcher. Runs once and exits. |
+| `watcher.py` | CLI and Windows scheduled-task entry point. Runs once and exits. |
 | `watcher_gui.pyw` | The window. |
+| `engine.py` | Search, add, confirmation and cleanup orchestration. |
+| `qb_client.py` | qBittorrent Web API requests and preferences. |
+| `matching.py` | Release-name, episode and torrent-identity matching. |
+| `store.py` | Validated storage, transactions and schema migration. |
 | `series.example.json` | Shows the layout of the watch list. |
-| `series.json` | Your watch list and history. Created on first use, not shared. |
+| `series.json` | Your watch settings and independent download records. Created on first use, not shared. |
 | `watcher.log` | What the watcher did. Created on first run. |
+
+## Development
+
+Run the regression and migration tests with:
+
+```
+python -m unittest discover -s tests -v
+```
+
+Tests use temporary watch lists and simulated clients. They do not contact
+qBittorrent or change your watch list, downloads or Windows startup settings.
+The GUI and CLI share `WatcherEngine`; only `ConfigStore` writes settings and
+download records. The GUI schedules checks in a subprocess so long searches
+stay independent of the window, and schedules cleanup separately every
+30 seconds through the same engine.
 
 ## Troubleshooting
 

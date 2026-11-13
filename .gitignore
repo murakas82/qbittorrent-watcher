@@ -1,5 +1,6 @@
 # Your own watch list, history and log stay on your computer.
 series.json
+series.json*.bak
 watcher.log
 *.lock
 *.tmp

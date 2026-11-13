@@ -29,7 +29,8 @@ try:
 except ImportError:
     winreg = None
 
-import watcher
+from engine import WatcherEngine
+from store import ConfigStore, HERE
 
 CHECK_EVERY = 3600  # seconds between automatic checks while qBittorrent runs
 POLL_EVERY = 5  # seconds between looks for qBittorrent
@@ -58,7 +59,16 @@ def episode_ranges(episodes):
 
 
 def series_key(show):
-    return f"{show['name'].strip().lower()}|{show['season']}"
+    return show["id"]
+
+
+def display_date(value):
+    """Format the stored ISO date for display, preserving its time or log text."""
+    try:
+        day = datetime.strptime(value[:10], "%Y-%m-%d")
+    except ValueError:
+        return value
+    return day.strftime("%d.%m.%Y") + value[10:]
 
 
 class SeriesDialog(tk.Toplevel):
@@ -219,17 +229,23 @@ def set_autostart(on):
 
 
 class App(tk.Tk):
-    def __init__(self, background=False, standalone=True):
+    def __init__(self, background=False, standalone=True, store=None):
         """background: start hidden. standalone=False (tests) skips autostart,
         the single-instance listener and the qBittorrent monitor."""
         super().__init__()
+        if background:
+            self.withdraw()
         self.title("qBittorrent Watcher")
         self.scale = self.winfo_fpixels("1i") / 96
         self.geometry(f"{self.px(900)}x{self.px(600)}")
         self.minsize(self.px(700), self.px(450))
+        self.store = store if store is not None else ConfigStore()
+        self.engine = WatcherEngine(self.store)
         self.shows = []
+        self.downloads = []
         self.checking = False
         self.config_mtime = None
+        self.config_retry = False
         self.log_mtime = None
 
         toolbar = ttk.Frame(self, padding=(12, 10, 12, 6))
@@ -312,15 +328,13 @@ class App(tk.Tk):
         self.pump()
         self.poll()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        if background:
-            self.withdraw()
         if standalone:
             self.start_background_work()
 
     def start_background_work(self):
         """Autostart, the single-instance listener and the qBittorrent monitor."""
         try:
-            config = watcher.load_config()
+            config = self.store.load()
         except (OSError, ValueError):
             config = {}
         # On the very first start, switch autostart on; after that, respect it.
@@ -376,57 +390,62 @@ class App(tk.Tk):
     def refresh(self, force=False):
         """Reload series.json and the log if they changed on disk."""
         try:
-            mtime = watcher.CONFIG_FILE.stat().st_mtime
-        except OSError:
-            mtime = None
-        if force or mtime != self.config_mtime:
-            self.config_mtime = mtime
             try:
-                config = watcher.load_config() if mtime else {"series": []}
+                mtime = self.store.path.stat().st_mtime
+            except FileNotFoundError:
+                mtime = None
+            if force or self.config_retry or mtime != self.config_mtime:
+                config = self.store.load()
+                # Failed reads must neither replace the displayed snapshot nor
+                # prevent the next poll from retrying an unchanged file.
+                self.config_mtime = mtime
+                self.config_retry = False
                 self.shows = config["series"]
+                self.downloads = config["downloads"]
                 self.saved_limit = int(config.get("max_downloads", 0))
                 if not self.editing_limit():
                     self.max_downloads.set(str(self.saved_limit))
-            except (OSError, ValueError) as error:
-                self.shows = []
-                self.status.set(f"Could not read series.json: {error}")
-            keep = self.table.selection()
-            self.table.delete(*self.table.get_children())
-            for show in self.shows:
-                got = [item["episode"] for item in show.get("history", [])]
-                self.table.insert(
-                    "",
-                    "end",
-                    iid=series_key(show),
-                    values=(
-                        show["name"],
-                        show["season"],
-                        f"S{show['season']:02d}E{show['next_episode']:02d}",
-                        episode_ranges(got) or "none yet",
-                        show.get("quality") or "Any",
-                        "Watching" if show.get("enabled", True) else "Paused",
-                        show.get("save_path") or "(qBittorrent default)",
-                    ),
-                )
-            if keep and self.table.exists(keep[0]):
-                self.table.selection_set(keep[0])
-            elif self.shows:
-                self.table.selection_set(series_key(self.shows[0]))
-            self.selection_changed()
+                keep = self.table.selection()
+                self.table.delete(*self.table.get_children())
+                for show in self.shows:
+                    got = [d["episode"] for d in self.downloads if d["series_id"] == show["id"]
+                           and d["season"] == show["season"] and d["episode"] is not None]
+                    self.table.insert(
+                        "",
+                        "end",
+                        iid=series_key(show),
+                        values=(
+                            show["name"],
+                            show["season"],
+                            f"S{show['season']:02d}E{show['next_episode']:02d}",
+                            episode_ranges(got) or "none yet",
+                            show.get("quality") or "Any",
+                            "Watching" if show.get("enabled", True) else "Paused",
+                            show.get("save_path") or "(qBittorrent default)",
+                        ),
+                    )
+                if keep and self.table.exists(keep[0]):
+                    self.table.selection_set(keep[0])
+                elif self.shows:
+                    self.table.selection_set(series_key(self.shows[0]))
+                self.selection_changed()
+        except (OSError, ValueError) as error:
+            self.config_retry = True
+            self.status.set(f"Could not read series.json: {error}")
 
         try:
-            log_mtime = watcher.LOG_FILE.stat().st_mtime
+            log_mtime = self.engine.log_file.stat().st_mtime
         except OSError:
             log_mtime = None
         if force or log_mtime != self.log_mtime:
             self.log_mtime = log_mtime
             try:
-                lines = watcher.LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = self.engine.log_file.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 lines = []
             self.log_text.configure(state="normal")
             self.log_text.delete("1.0", "end")
-            self.log_text.insert("end", "\n".join(lines[-300:]))
+            self.log_text.insert("end", "\n".join(display_date(line) for line in lines[-300:]))
             self.log_text.configure(state="disabled")
             self.log_text.see("end")
 
@@ -440,47 +459,33 @@ class App(tk.Tk):
         )
         self.history.delete(*self.history.get_children())
         if show:
-            for item in sorted(show.get("history", []), key=lambda i: i["episode"], reverse=True):
-                self.history.insert(
-                    "",
-                    "end",
-                    values=(
-                        f"S{show['season']:02d}E{item['episode']:02d}",
-                        item.get("added", ""),
-                        item.get("title", ""),
-                    ),
-                )
+            records = [d for d in self.downloads if d["series_id"] == show["id"]]
+            for item in sorted(records, key=lambda d: (d["season"] or 0, d["episode"] or 0, d["added"]), reverse=True):
+                tag = (f"S{item['season']:02d}E{item['episode']:02d}"
+                       if item["season"] is not None and item["episode"] is not None
+                       else item.get("label", ""))
+                self.history.insert("", "end", values=(tag, display_date(item["added"]), item["title"]))
 
-    def change(self, edit):
-        """Apply edit(series_list) to series.json.
-
-        Goes through watcher.update_config, which re-reads the file and saves
-        under a lock, so a check running at the same time loses nothing.
-        """
+    def change(self, action):
+        """Run a storage command and refresh the displayed snapshot."""
         try:
-            watcher.update_config(lambda config: edit(config["series"]))
+            action()
         except (OSError, ValueError) as error:
             messagebox.showerror("qBittorrent Watcher", f"Could not save series.json:\n{error}", parent=self)
+            return False
         self.refresh(force=True)
+        return True
 
     # ---- actions --------------------------------------------------------
 
     def add(self):
         dialog = SeriesDialog(self)
         self.wait_window(dialog)
-        new = dialog.result
-        if not new:
+        if not dialog.result:
             return
-        if any(watcher.same_series(new, show) for show in self.shows):
-            messagebox.showinfo(
-                "qBittorrent Watcher",
-                f"{new['name']} season {new['season']} is already in the list.",
-                parent=self,
-            )
-            return
-        new["history"] = []
-        self.change(lambda series: series.append(new))
-        self.table.selection_set(series_key(new))
+        created = []
+        if self.change(lambda: created.append(self.store.add_series(dialog.result))):
+            self.table.selection_set(created[0])
 
     def edit(self):
         old = self.selected()
@@ -488,82 +493,25 @@ class App(tk.Tk):
             return
         dialog = SeriesDialog(self, old)
         self.wait_window(dialog)
-        new = dialog.result
-        if not new:
-            return
-        if not watcher.same_series(new, old) and any(
-            watcher.same_series(new, show) for show in self.shows
-        ):
-            messagebox.showinfo(
-                "qBittorrent Watcher",
-                f"{new['name']} season {new['season']} is already in the list.",
-                parent=self,
-            )
-            return
-
-        # The dialog shows the next episode as it was when it opened. A check
-        # may have moved it on since, so only write it back if the user
-        # changed it (or changed the season, which starts a new count).
-        episode_edited = (
-            new["next_episode"] != old["next_episode"] or new["season"] != old["season"]
-        )
-
-        def apply(series):
-            for entry in series:
-                if watcher.same_series(entry, old):
-                    if entry["season"] != new["season"]:
-                        # The history belongs to the old season, but its
-                        # torrents may still be downloading. Keep their IDs so
-                        # they are still removed when they finish.
-                        still_ours = [
-                            {
-                                "hash": item["hash"],
-                                "label": f"S{entry['season']:02d}E{item['episode']:02d}",
-                                "since": f"{datetime.now():%Y-%m-%d}",
-                            }
-                            for item in entry.get("history", [])
-                            if item.get("hash")
-                        ]
-                        if still_ours:
-                            entry.setdefault("cleanup", []).extend(still_ours)
-                        entry["history"] = []
-                    changes = dict(new)
-                    if not episode_edited:
-                        del changes["next_episode"]
-                    entry.update(changes)
-
-        self.change(apply)
-        if self.table.exists(series_key(new)):
-            self.table.selection_set(series_key(new))
+        if dialog.result:
+            self.change(lambda: self.store.edit_series(old["id"], dialog.result, original=old))
 
     def toggle(self):
-        old = self.selected()
-        if not old:
-            return
-
-        def apply(series):
-            for entry in series:
-                if watcher.same_series(entry, old):
-                    entry["enabled"] = not entry.get("enabled", True)
-
-        self.change(apply)
+        show = self.selected()
+        if show:
+            self.change(lambda: self.store.toggle_series(show["id"]))
 
     def remove(self):
-        old = self.selected()
-        if not old:
+        show = self.selected()
+        if not show:
             return
-        if not messagebox.askyesno(
+        if messagebox.askyesno(
             "Remove series",
-            f"Stop watching {old['name']} season {old['season']}?\n\n"
+            f"Stop watching {show['name']} season {show['season']}?\n\n"
             "Its download history is forgotten. Downloaded files and torrents are not touched.",
             parent=self,
         ):
-            return
-        self.change(
-            lambda series: series.__setitem__(
-                slice(None), [e for e in series if not watcher.same_series(e, old)]
-            )
-        )
+            self.change(lambda: self.store.remove_series(show["id"]))
 
     def editing_limit(self):
         try:
@@ -581,18 +529,15 @@ class App(tk.Tk):
         if limit == self.saved_limit:
             return
         try:
-            config = watcher.update_config(
-                lambda config: config.__setitem__("max_downloads", limit)
-            )
+            self.store.set_setting("max_downloads", limit)
         except (OSError, ValueError) as error:
             messagebox.showerror("qBittorrent Watcher", f"Could not save the setting:\n{error}", parent=self)
             return
         self.saved_limit = limit
-        url = config.get("qbittorrent_url", "")
 
         def work():
             try:
-                watcher.apply_download_limit(watcher.QBittorrent(url), limit)
+                self.engine.apply_limit()
             except (urllib.error.URLError, OSError, ValueError):
                 pass  # qBittorrent is closed; the next check applies it
 
@@ -612,9 +557,10 @@ class App(tk.Tk):
                 python = Path(sys.executable)
             try:
                 done = subprocess.run(
-                    [str(python), str(watcher.HERE / "watcher.py")],
+                    [str(python), str(HERE / "watcher.py"), "--config", str(self.store.path)],
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    env=dict(os.environ, PYTHONIOENCODING="utf-8"),
                     creationflags=NO_WINDOW,
                 )
                 problem = done.stderr.strip() if done.returncode not in (0, 1) else ""
@@ -647,33 +593,17 @@ class App(tk.Tk):
         self.status.set(text)
 
     def monitor(self):
-        """Background thread: keep asking whether qBittorrent is reachable."""
+        """Schedule engine probes and cleanup without touching window widgets."""
         last_tidy = 0.0
         while True:
-            reachable = False
+            tidy = time.monotonic() - last_tidy >= TIDY_EVERY
             try:
-                config = watcher.load_config()
-                qb = watcher.QBittorrent(config.get("qbittorrent_url", ""))
-                qb.call("app/version", timeout=3)
-                online = reachable = True
-            except urllib.error.HTTPError:
-                online = True  # running but refusing us; the check will log why
+                online = self.engine.poll(tidy=tidy)
             except (urllib.error.URLError, OSError, ValueError):
                 online = False
+            if tidy:
+                last_tidy = time.monotonic()
             self.results.put(lambda online=online: self.qbittorrent_seen(online))
-
-            # Take finished episodes out of qBittorrent soon after they
-            # complete, instead of leaving them until the next hourly check.
-            # This keeps going while a check runs: a long catch-up would
-            # otherwise hold removals back, and removing twice is harmless.
-            if reachable and time.time() - last_tidy >= TIDY_EVERY:
-                last_tidy = time.time()
-                for show in config["series"]:
-                    if show.get("enabled", True) and show.get("remove_when_done"):
-                        try:
-                            watcher.remove_finished(qb, show, dry_run=False)
-                        except (urllib.error.URLError, OSError, ValueError, KeyError):
-                            break
             time.sleep(POLL_EVERY)
 
     def qbittorrent_seen(self, online):
@@ -721,7 +651,7 @@ class App(tk.Tk):
 
     def remember_autostart(self, wanted):
         try:
-            watcher.update_config(lambda config: config.__setitem__("autostart", wanted))
+            self.store.set_setting("autostart", wanted)
         except (OSError, ValueError):
             pass
 
