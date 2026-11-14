@@ -104,6 +104,7 @@ class ReviewRegressions(unittest.TestCase):
         self.run_check()
         self.assertEqual(self.qb.added, [])
         self.assertFalse(self.store.load()["downloads"][0]["managed"])
+        self.assertEqual(self.store.load()["downloads"][0]["hash"], "manual")
 
     def test_cleanup_does_not_remove_manual_torrent(self):
         self.qb.client = [dict(name="Example.Show.S01E01.1080p", hash="manual",
@@ -177,9 +178,9 @@ class ReviewRegressions(unittest.TestCase):
     def test_ambiguous_plugin_download_is_not_claimed(self):
         self.qb.client = [dict(name="Example.Show.S01E01.1080p", hash=h) for h in ("one", "two")]
         row = dict(fileUrl="https://example.test/torrent", fileName="Example.Show.S01E01.1080p")
-        torrent, owned = w.wait_for_added(self.qb, row, self.show, set())
-        self.assertIsNotNone(torrent)
-        self.assertFalse(owned)
+        with patch.object(w, "ADD_WAIT_SECONDS", 0):
+            self.assertEqual(w.wait_for_added(self.qb, row, self.show, set(), "watcher-requested"),
+                             (None, False))
 
     def test_magnet_waits_for_requested_hash_when_manual_release_appears_first(self):
         expected = dict(name="Example.Show.S01E01.1080p", hash="a" * 40)
@@ -205,10 +206,12 @@ class ReviewRegressions(unittest.TestCase):
         self.assertIsNotNone(torrent)
         self.assertFalse(owned)
 
-    def test_plugin_waits_for_full_release_title_without_claiming_ownership(self):
-        manual = dict(name="Example.Show.S01E01.720p.manual", hash="manual")
-        requested = dict(name="Example.Show.S01E01.1080p.requested", hash="requested")
-        row = dict(fileName=requested["name"], fileUrl="https://example.test/plugin", nbSeeders=10)
+    def test_plugin_confirms_changed_name_and_manages_only_tagged_download(self):
+        tag = "watcher-requested"
+        manual = dict(name="Example.Show.S01E01.1080p.search-title", hash="manual")
+        requested = dict(name="Example.Show.S01E01.1080p.actual-name", hash="requested",
+                         tags="personal, " + tag)
+        row = dict(fileName=manual["name"], fileUrl="https://example.test/plugin", nbSeeders=10)
         self.qb.search = lambda pattern, timeout: [row]
         self.qb.move = Mock()
         snapshots = iter([[manual], [manual, requested]])
@@ -222,25 +225,60 @@ class ReviewRegressions(unittest.TestCase):
             nonlocal submitted
             submitted = True
             self.qb.added.append((release, path))
+            return tag
         self.qb.torrents = torrents
         self.qb.add = add
         with patch.object(w.time, "sleep"):
             self.run_check()
-        self.qb.move.assert_not_called()
+        self.qb.move.assert_called_once_with("requested", "folder-A")
         record = self.store.load()["downloads"][0]
         self.assertEqual(record["title"], requested["name"])
-        self.assertFalse(record["managed"])
-        self.assertNotIn("hash", record)
+        self.assertTrue(record["managed"])
+        self.assertEqual(record["hash"], "requested")
+        self.assertEqual(self.store.current_entry(self.show["id"])["next_episode"], 2)
         self.qb.torrents = lambda: [dict(t, progress=1, state="stalledUP") for t in (manual, requested)]
         self.engine.cleanup(qb=self.qb)
-        self.assertEqual(self.qb.deleted, [])
+        self.assertEqual(self.qb.deleted, ["requested"])
 
     def test_single_plugin_match_is_not_proof_of_ownership(self):
         row = dict(fileName="Example.Show.S01E01.1080p", fileUrl="https://example.test/plugin")
         self.qb.client = [dict(name=row["fileName"], hash="manual")]
-        torrent, owned = w.wait_for_added(self.qb, row, self.show, set())
-        self.assertIsNotNone(torrent)
+        with patch.object(w, "ADD_WAIT_SECONDS", 0):
+            self.assertEqual(w.wait_for_added(self.qb, row, self.show, set(), "watcher-requested"),
+                             (None, False))
+
+    def test_existing_tagged_torrent_is_not_claimed(self):
+        row = dict(fileUrl="https://example.test/plugin")
+        self.qb.client = [dict(name="changed name", hash="existing", tags="watcher-requested")]
+        torrent, owned = w.wait_for_added(self.qb, row, self.show, {"EXISTING"}, "watcher-requested")
+        self.assertEqual(torrent["hash"], "existing")
         self.assertFalse(owned)
+
+    def test_plugin_confirmation_requires_the_exact_tag(self):
+        row = dict(fileUrl="https://example.test/plugin")
+        self.qb.client = [dict(name="Example.Show.S01E01.1080p", hash="manual",
+                               tags="watcher-requested-other")]
+        with patch.object(w, "ADD_WAIT_SECONDS", 0):
+            self.assertEqual(w.wait_for_added(self.qb, row, self.show, set(), "watcher-requested"),
+                             (None, False))
+
+    def test_rewind_does_not_duplicate_or_unmanage_existing_torrent(self):
+        self.store.record_download(self.show, "Example.Show.S01E01.1080p", "owned")
+        original = self.store.load()["downloads"][0]
+        self.edit(next_episode=1)
+        self.qb.client = [dict(name=original["title"], hash="owned")]
+        self.run_check()
+        self.assertEqual(self.store.load()["downloads"], [original])
+        self.assertEqual(self.store.current_entry(self.show["id"])["next_episode"], 2)
+        self.assertEqual(self.qb.added, [])
+
+    def test_poll_propagates_configuration_errors_without_probing_client(self):
+        for error in (ValueError("season must be positive"), OSError("watch list busy")):
+            with self.subTest(error=error), patch.object(self.store, "load", side_effect=error), \
+                 patch.object(self.qb, "call") as call:
+                with self.assertRaises(type(error)):
+                    self.engine.poll(tidy=True)
+                call.assert_not_called()
 
     def test_plugin_does_not_confirm_a_different_release(self):
         row = dict(fileName="Example.Show.S01E01.1080p", fileUrl="https://example.test/plugin")

@@ -5,7 +5,7 @@ import time
 import urllib.error
 from datetime import datetime
 
-from matching import find_episode, magnet_hash, normalize, pick_candidates
+from matching import find_episode, magnet_hash, pick_candidates
 from qb_client import QBittorrent, apply_download_limit
 from store import ConfigStore, FileLock
 
@@ -22,7 +22,7 @@ def in_client(qb, show):
     return matches[0] if matches else None
 
 
-def wait_for_added(qb, row, show, known):
+def wait_for_added(qb, row, show, known, tag=None):
     """Wait for the torrent just submitted to appear in qBittorrent.
 
     Returns (torrent, ours). `ours` is True only when the torrent is certainly
@@ -30,14 +30,14 @@ def wait_for_added(qb, row, show, known):
     removal later. `known` holds the IDs that were in qBittorrent just before
     the add, so an existing torrent is never claimed as a new addition.
 
-    A magnet link names its torrent's ID, so that exact torrent is looked
-    for, even if another release appears first. A plugin download does not
-    expose an ID: its full release title must match before progress can be
-    recorded, and ownership remains unverified. Such torrents are never moved
-    or removed automatically, even if only one new matching torrent appears.
+    Magnets are confirmed by their exact hash. Page links are submitted with
+    a unique tag that qBittorrent carries through plugin resolution. Their
+    torrent names need not equal the search result's title. Untagged torrents
+    are never accepted as confirmation of a page-link submission.
     """
     expected = magnet_hash(row.get("fileUrl", ""))
-    release_title = normalize(row.get("fileName", ""))
+    if not expected and not tag:
+        return None, False
     known = {torrent_hash.lower() for torrent_hash in known}
     deadline = time.monotonic() + ADD_WAIT_SECONDS
     while True:
@@ -46,11 +46,12 @@ def wait_for_added(qb, row, show, known):
             for torrent in torrents:
                 if torrent.get("hash", "").lower() == expected:
                     return torrent, expected not in known
-        elif release_title:
-            for torrent in find_episode(torrents, show):
-                if (torrent.get("hash", "").lower() not in known
-                        and normalize(torrent["name"]) == release_title):
-                    return torrent, False
+        elif tag:
+            for torrent in torrents:
+                tags = {value.strip() for value in torrent.get("tags", "").split(",")}
+                torrent_hash = torrent.get("hash", "").lower()
+                if torrent_hash and tag in tags:
+                    return torrent, torrent_hash not in known
         if time.monotonic() >= deadline:
             return None, False
         time.sleep(3)
@@ -123,13 +124,15 @@ class WatcherEngine:
 
     def poll(self, tidy=False):
         """Probe connectivity and optionally tidy, independent of long checks."""
+        # A storage failure says nothing about qBittorrent's availability.
+        # Let the GUI report it without triggering an offline transition.
+        config = self.store.load()
         try:
-            config = self.store.load()
             qb = self.client_factory(config["qbittorrent_url"])
             qb.call("app/version", timeout=3)
         except urllib.error.HTTPError:
             return True  # running but refusing us; the check reports the error
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, OSError):
             return False
         if tidy:
             self.cleanup(qb=qb)
@@ -238,9 +241,12 @@ class WatcherEngine:
                     break
 
                 got_title = None
-                got_hash = None  # set only for torrents added here, never for found ones
+                got_hash = None
+                got_managed = False
+                add_tag = None
                 if already_there:
                     got_title = already_there["name"]
+                    got_hash = already_there.get("hash")
                     self.log(f"{label}: already in qBittorrent, skipping")
                 else:
                     candidates = pick_candidates(results, show)
@@ -279,16 +285,16 @@ class WatcherEngine:
                                     appeared = by_hand[0]
                                     break
                                 known = {t.get("hash", "").lower() for t in present}
-                                qb.add(row, show.get("save_path", ""))
-                                added, ours = wait_for_added(qb, row, show, known)
+                                add_tag = qb.add(row, show.get("save_path", ""))
+                                added, ours = wait_for_added(qb, row, show, known, add_tag)
                             except (urllib.error.URLError, OSError, ValueError) as error:
                                 self.log(f"{label}: adding failed ({error})")
                             if added:
                                 self.log(f"{label}: added {summary}")
                                 folder = show.get("save_path", "")
                                 if folder and ours:
-                                    # Set the folder after the add too, because
-                                    # plugin downloads ignore it at add time.
+                                    # Ensure the confirmed torrent uses the
+                                    # requested folder.
                                     try:
                                         qb.move(added["hash"], folder)
                                     except (urllib.error.URLError, OSError) as error:
@@ -302,22 +308,29 @@ class WatcherEngine:
                             continue
                         if appeared:
                             got_title = appeared["name"]
+                            got_hash = appeared.get("hash")
                             self.log(f"{label}: appeared in qBittorrent during the search, not adding")
                         elif not added:
                             break
                         else:
                             got_title = added["name"]
-                            # Record the ID only when the torrent is certainly the
-                            # watcher's own; only recorded torrents are ever removed.
-                            got_hash = added.get("hash") if ours else None
+                            got_hash = added.get("hash")
+                            got_managed = ours
 
                 if not dry_run:
                     # Save after every episode so a crash never causes a duplicate.
                     try:
-                        self.store.record_download(show, got_title, got_hash)
+                        self.store.record_download(show, got_title, got_hash, managed=got_managed)
                     except (OSError, ValueError) as error:
                         self.log(f"{label}: could not save progress ({error})")
                         break
+                    if add_tag and got_managed:
+                        # The persisted hash now identifies the managed torrent;
+                        # remove the temporary tag from qBittorrent's tag list.
+                        try:
+                            qb.call("torrents/deleteTags", {"tags": add_tag}, post=True)
+                        except (urllib.error.URLError, OSError):
+                            pass
                 show["next_episode"] += 1
 
         return 0

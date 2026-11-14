@@ -151,6 +151,8 @@ def validate(config):
                 raise ValueError(f"Download {key} must be text")
         if type(record.get("managed")) is not bool:
             raise ValueError("Download managed must be true or false")
+        if "hash" in record and (not isinstance(record["hash"], str) or not record["hash"]):
+            raise ValueError("Download hash must be nonempty text")
         if record["managed"] and (not isinstance(record.get("hash"), str) or not record["hash"]):
             raise ValueError("Managed downloads need a torrent hash")
         if record.get("status") not in ("added", "removed", "observed"):
@@ -323,27 +325,42 @@ class ConfigStore:
             raise ValueError(f"Unknown setting: {key}")
         return self.update(lambda config: config.__setitem__(key, value))
 
-    def record_download(self, show, title, torrent_hash=None):
-        """Keep each managed torrent independently, including replacements."""
+    def record_download(self, show, title, torrent_hash=None, *, managed=True):
+        """Retain torrent identity independently of permission to manage it.
+
+        Observing an existing torrent preserves its original record and any
+        ownership already established. Different hashes remain separate so
+        replacement downloads can still be cleaned up independently.
+        """
+        managed = bool(torrent_hash) and managed
         def record(config):
             entry = next((s for s in config["series"] if s["id"] == show["id"]), None)
             if entry is None:
                 return
             fresh = dict(id=uuid.uuid4().hex, series_id=show["id"], season=show["season"],
                          episode=show["next_episode"], title=title or "",
-                         added=f"{datetime.now():%Y-%m-%d %H:%M}", managed=bool(torrent_hash),
-                         status="added" if torrent_hash else "observed")
+                         added=f"{datetime.now():%Y-%m-%d %H:%M}", managed=managed,
+                         status="added" if managed else "observed")
             if torrent_hash:
                 fresh["hash"] = torrent_hash.lower()
             existing = next((d for d in config["downloads"]
                              if d["series_id"] == show["id"] and d["season"] == fresh["season"]
                              and d["episode"] == fresh["episode"]
-                             and d.get("hash") == fresh.get("hash")), None)
+                             and d.get("hash", "").lower() == fresh.get("hash", "")), None)
+            if existing is None and torrent_hash:
+                # Older observed records did not store identity. Enrich a
+                # matching record rather than adding a second history row.
+                existing = next((d for d in config["downloads"]
+                                 if d["series_id"] == show["id"] and d["season"] == fresh["season"]
+                                 and d["episode"] == fresh["episode"] and not d.get("hash")
+                                 and normalize(d["title"]) == normalize(fresh["title"])), None)
             if existing is None:
                 config["downloads"].append(fresh)
-            elif torrent_hash:
+            elif managed:
                 fresh["id"] = existing["id"]
                 existing.update(fresh)
+            elif torrent_hash and not existing.get("hash"):
+                existing["hash"] = fresh["hash"]
             if entry["season"] == show["season"] and entry["next_episode"] == show["next_episode"]:
                 entry["next_episode"] += 1
         return self.update(record)

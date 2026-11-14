@@ -246,6 +246,7 @@ class App(tk.Tk):
         self.checking = False
         self.config_mtime = None
         self.config_retry = False
+        self.config_error = None
         self.log_mtime = None
 
         toolbar = ttk.Frame(self, padding=(12, 10, 12, 6))
@@ -400,6 +401,7 @@ class App(tk.Tk):
                 # prevent the next poll from retrying an unchanged file.
                 self.config_mtime = mtime
                 self.config_retry = False
+                self.config_error = None
                 self.shows = config["series"]
                 self.downloads = config["downloads"]
                 self.saved_limit = int(config.get("max_downloads", 0))
@@ -429,9 +431,11 @@ class App(tk.Tk):
                 elif self.shows:
                     self.table.selection_set(series_key(self.shows[0]))
                 self.selection_changed()
+                self.show_status()
         except (OSError, ValueError) as error:
             self.config_retry = True
-            self.status.set(f"Could not read series.json: {error}")
+            self.config_error = f"Could not read series.json: {error}"
+            self.show_status()
 
         try:
             log_mtime = self.engine.log_file.stat().st_mtime
@@ -581,7 +585,9 @@ class App(tk.Tk):
     # ---- background updates ----------------------------------------------
 
     def show_status(self):
-        if self.checking:
+        if self.config_error:
+            text = self.config_error
+        elif self.checking:
             text = "Checking for new episodes…"
         elif self.qb_online:
             due = datetime.fromtimestamp(self.last_check + CHECK_EVERY)
@@ -597,16 +603,24 @@ class App(tk.Tk):
         last_tidy = 0.0
         while True:
             tidy = time.monotonic() - last_tidy >= TIDY_EVERY
+            error = None
             try:
                 online = self.engine.poll(tidy=tidy)
-            except (urllib.error.URLError, OSError, ValueError):
-                online = False
+            except (OSError, ValueError) as problem:
+                online = None
+                error = f"Could not read series.json: {problem}"
             if tidy:
                 last_tidy = time.monotonic()
-            self.results.put(lambda online=online: self.qbittorrent_seen(online))
+            self.results.put(lambda online=online, error=error: self.qbittorrent_seen(online, error))
             time.sleep(POLL_EVERY)
 
-    def qbittorrent_seen(self, online):
+    def qbittorrent_seen(self, online, error=None):
+        if error:
+            self.config_retry = True
+            self.config_error = error
+        if self.config_error:
+            self.show_status()
+            return
         was_online = self.qb_online
         self.qb_online = online
         if online and not was_online:

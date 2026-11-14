@@ -110,6 +110,47 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.add_series(dict(self.fields, name="ExampleShow"))
 
+    def test_observation_keeps_managed_record_and_original_date(self):
+        series_id = self.store.add_series(self.fields)
+        show = self.store.current_entry(series_id)
+        self.store.record_download(show, "owned", "ABCD")
+        self.store.update(lambda config: config["downloads"][0].update(added="2026-01-01 12:00"))
+        original = self.store.load()["downloads"][0]
+        self.store.edit_series(series_id, dict(next_episode=show["next_episode"]))
+        self.store.record_download(show, "renamed in client", "abcd", managed=False)
+        self.assertEqual(self.store.load()["downloads"], [original])
+        self.assertEqual(self.store.current_entry(series_id)["next_episode"], show["next_episode"] + 1)
+
+    def test_observation_does_not_reactivate_removed_torrent(self):
+        series_id = self.store.add_series(self.fields)
+        show = self.store.current_entry(series_id)
+        self.store.record_download(show, "owned", "hash")
+        original = self.store.load()["downloads"][0]
+        self.store.mark_removed({original["id"]})
+        self.store.record_download(show, "owned", "hash", managed=False)
+        records = self.store.load()["downloads"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["status"], "removed")
+        self.assertTrue(records[0]["managed"])
+
+    def test_observed_hash_deduplicates_without_granting_ownership(self):
+        series_id = self.store.add_series(self.fields)
+        show = self.store.current_entry(series_id)
+        self.store.record_download(show, "manual", "manual", managed=False)
+        self.store.record_download(show, "manual", "MANUAL", managed=False)
+        self.store.record_download(show, "replacement", "other", managed=False)
+        records = self.store.load()["downloads"]
+        self.assertEqual({d["hash"] for d in records}, {"manual", "other"})
+        self.assertTrue(all(not d["managed"] and d["status"] == "observed" for d in records))
+
+    def test_legacy_observed_record_gains_identity_without_duplicate(self):
+        series_id = self.store.add_series(self.fields)
+        show = self.store.current_entry(series_id)
+        self.store.record_download(show, "Example.Release")
+        original = self.store.load()["downloads"][0]
+        self.store.record_download(show, "Example Release", "known-hash", managed=False)
+        self.assertEqual(self.store.load()["downloads"], [dict(original, hash="known-hash")])
+
     def test_concurrent_processes_do_not_lose_updates(self):
         self.store.update(lambda config: config.update(counter=0))
         script = """import sys, time

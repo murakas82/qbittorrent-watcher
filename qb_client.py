@@ -5,11 +5,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 class QBittorrent:
     def __init__(self, base_url):
         self.base = base_url.rstrip("/") + "/api/v2/"
+        self._api_version = None
 
     def call(self, endpoint, params=None, post=False, timeout=30):
         data = urllib.parse.urlencode(params or {})
@@ -50,22 +52,31 @@ class QBittorrent:
                 pass
 
     def add(self, row, save_path):
-        """Hand a search result to qBittorrent. Does not confirm it arrived."""
+        """Submit a result; return its unique confirmation tag for page links.
+
+        The plugin runs inside qBittorrent, with the same per-download settings
+        as a magnet. Only this submission receives the returned tag, so a
+        concurrent manual download cannot be mistaken for the requested one.
+        """
         url = row["fileUrl"]
-        if url.startswith("magnet:"):
-            params = {"urls": url}
-            if save_path:
-                params["savepath"] = save_path
-            self.call("torrents/add", params, post=True)
-        else:
-            # Many plugins return a page link that only the plugin itself can
-            # turn into a torrent, so let the plugin fetch it (as the GUI does).
-            # This route ignores save_path; run_check moves the torrent afterwards.
-            self.call(
-                "search/downloadTorrent",
-                {"torrentUrl": url, "pluginName": row.get("engineName", "")},
-                post=True,
-            )
+        params = {"urls": url}
+        tag = None
+        if not url.startswith("magnet:"):
+            plugin = row.get("engineName", "")
+            if not plugin:
+                raise ValueError("Page-link search result has no search plugin name")
+            if self._api_version is None:
+                version = self.call("app/webapiVersion").strip()
+                self._api_version = tuple(int(part) for part in version.split("."))
+            if self._api_version < (2, 13, 1):
+                raise ValueError("Page-link downloads require qBittorrent 5.2 or newer "
+                                 "(Web API 2.13.1). Please update qBittorrent.")
+            tag = "watcher-" + uuid.uuid4().hex
+            params.update(downloader=plugin, tags=tag)
+        if save_path:
+            params.update(savepath=save_path, autoTMM="false")
+        self.call("torrents/add", params, post=True)
+        return tag
 
     def torrents(self):
         return json.loads(self.call("torrents/info"))

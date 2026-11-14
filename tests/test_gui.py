@@ -105,6 +105,27 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(self.app.config_retry)
         self.assertEqual(self.app.selected()["id"], self.series_id)
 
+    def test_config_error_survives_probes_and_clears_after_successful_read(self):
+        self.app.qb_online = True
+        self.app.autostart.set(True)
+        with patch.object(self.store, "load", side_effect=ValueError("season must be positive")):
+            self.app.refresh(force=True)
+        error = self.app.status.get()
+        self.assertIn("season must be positive", error)
+        with patch.object(self.app, "withdraw") as hide, patch.object(self.app, "check_now") as check:
+            self.app.qbittorrent_seen(False)
+            self.app.qbittorrent_seen(True)
+            hide.assert_not_called()
+            check.assert_not_called()
+        self.app.checking = True
+        self.app.show_status()
+        self.assertEqual(self.app.status.get(), error)
+        self.assertTrue(self.app.qb_online)
+        self.app.refresh()
+        self.assertIsNone(self.app.config_error)
+        self.assertFalse(self.app.config_retry)
+        self.assertIn("Checking", self.app.status.get())
+
 
 class WindowCommandTests(unittest.TestCase):
     """Verify GUI commands even on runners without a working Tcl display."""
@@ -142,3 +163,17 @@ class WindowCommandTests(unittest.TestCase):
         gui.App.selection_changed(app)
         labels = {call.kwargs["values"][0] for call in history.insert.call_args_list}
         self.assertEqual(labels, {"S01E01", "S02E01"})
+
+    def test_probe_storage_error_preserves_online_state_and_visibility(self):
+        app = SimpleNamespace(config_retry=False, config_error=None, qb_online=True,
+                              checking=False, status=Mock(), withdraw=Mock(), check_now=Mock())
+        app.show_status = lambda: gui.App.show_status(app)
+        error = "Could not read series.json: season must be positive"
+        gui.App.qbittorrent_seen(app, None, error)
+        self.assertTrue(app.qb_online)
+        self.assertTrue(app.config_retry)
+        app.status.set.assert_called_with(error)
+        app.withdraw.assert_not_called()
+        gui.App.qbittorrent_seen(app, False)
+        self.assertTrue(app.qb_online)
+        app.status.set.assert_called_with(error)

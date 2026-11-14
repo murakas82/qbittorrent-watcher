@@ -26,8 +26,8 @@ It uses Python's standard library, with no extra dependencies to install.
   Windows and the window have only been used on Windows.
 - [Python 3.9 or newer](https://www.python.org/downloads/), installed with the
   default options (this includes the window toolkit).
-- qBittorrent 5.x with at least one search plugin installed and working in the
-  Search tab.
+- qBittorrent 5.2 or newer with at least one search plugin installed and
+  working in the Search tab.
 
 ## Setup
 
@@ -113,10 +113,14 @@ settings alone.
   series to another season while episodes are still downloading, those are
   still removed when they finish.
 
-Automatic moving and removal require a verified torrent hash. When a search
-plugin returns an HTTP link without that identity, the watcher waits for the
-full release title to appear and records it without claiming ownership. Such
-downloads use qBittorrent's default folder and stay in its list when finished.
+Page-link downloads use qBittorrent's plugin downloader with the selected
+folder and a temporary unique tag. The watcher confirms that tag, records the
+torrent hash, and then removes the tag. This also works when the torrent's name
+differs from the search result. Only confirmed additions are moved or removed;
+downloads added by hand can appear in history without becoming managed.
+This requires Web API 2.13.1 or newer (included in qBittorrent 5.2 and later).
+Older clients still support magnet results and report an upgrade message for
+page-link results before submitting them.
 
 ## Running it without the window
 
