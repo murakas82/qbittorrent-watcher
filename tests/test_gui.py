@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import tempfile
+import time
 import tkinter as tk
 import unittest
 from pathlib import Path
@@ -125,6 +126,42 @@ class WindowTests(unittest.TestCase):
         self.assertIsNone(self.app.config_error)
         self.assertFalse(self.app.config_retry)
         self.assertIn("Checking", self.app.status.get())
+
+    def test_plugin_notice_explains_setup_and_resumes_after_enabling(self):
+        self.app.last_check = time.time()
+        with patch.object(self.app, "check_now") as check, \
+             patch.object(self.app, "show_window"), \
+             patch.object(gui.messagebox, "showinfo") as help_message:
+            self.app.qbittorrent_seen(True, plugins_enabled=False)
+            self.assertEqual(self.app.plugin_notice.winfo_manager(), "pack")
+            self.assertIn("waiting for an enabled search plugin", self.app.status.get())
+            self.app.qbittorrent_seen(True, plugins_enabled=False)
+            check.assert_not_called()
+            help_message.assert_not_called()
+            self.app.search_plugin_help()
+            self.assertIn("View > Search Engine", help_message.call_args.args[1])
+            self.assertIn("Install a new one", help_message.call_args.args[1])
+            self.app.qbittorrent_seen(True, plugins_enabled=True)
+            self.assertEqual(self.app.plugin_notice.winfo_manager(), "")
+            check.assert_called_once()
+
+    def test_manual_check_with_no_plugins_shows_help_without_starting_worker(self):
+        self.app.search_plugins_enabled = False
+        with patch.object(gui.messagebox, "showinfo") as help_message, \
+             patch.object(gui.threading, "Thread") as worker:
+            self.app.check_now()
+        help_message.assert_called_once_with("Enable search plugins", gui.SEARCH_PLUGIN_HELP, parent=self.app)
+        worker.assert_not_called()
+        self.assertFalse(self.app.checking)
+
+    def test_unknown_plugin_status_does_not_show_disabled_notice(self):
+        self.app.qb_online = True
+        self.app.last_check = time.time()
+        with patch.object(self.app, "check_now") as check:
+            self.app.qbittorrent_seen(True, plugins_enabled=None)
+        self.assertEqual(self.app.plugin_notice.winfo_manager(), "")
+        self.assertIn("qBittorrent is running", self.app.status.get())
+        check.assert_not_called()
 
 
 class WindowCommandTests(unittest.TestCase):

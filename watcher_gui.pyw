@@ -30,6 +30,7 @@ except ImportError:
     winreg = None
 
 from engine import WatcherEngine
+from qb_client import NO_SEARCH_PLUGINS, SEARCH_PLUGIN_HELP
 from store import ConfigStore, HERE
 
 CHECK_EVERY = 3600  # seconds between automatic checks while qBittorrent runs
@@ -247,6 +248,7 @@ class App(tk.Tk):
         self.config_mtime = None
         self.config_retry = False
         self.config_error = None
+        self.search_plugins_enabled = None
         self.log_mtime = None
 
         toolbar = ttk.Frame(self, padding=(12, 10, 12, 6))
@@ -293,6 +295,10 @@ class App(tk.Tk):
 
         panes = ttk.PanedWindow(self, orient="vertical")
         panes.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        self.panes = panes
+        self.plugin_notice = ttk.Frame(self, padding=(12, 0, 12, 8))
+        ttk.Label(self.plugin_notice, text=NO_SEARCH_PLUGINS, foreground="#9a5700").pack(side="left")
+        ttk.Button(self.plugin_notice, text="How to fix…", command=self.search_plugin_help).pack(side="right")
 
         columns = {
             "name": ("Series", 200, "w"),
@@ -550,6 +556,9 @@ class App(tk.Tk):
     def check_now(self):
         if self.checking:
             return
+        if self.search_plugins_enabled is False:
+            self.search_plugin_help()
+            return
         self.checking = True
         self.last_check = time.time()
         self.check_button.configure(state="disabled", text="Checking…")
@@ -584,11 +593,16 @@ class App(tk.Tk):
 
     # ---- background updates ----------------------------------------------
 
+    def search_plugin_help(self):
+        messagebox.showinfo("Enable search plugins", SEARCH_PLUGIN_HELP, parent=self)
+
     def show_status(self):
         if self.config_error:
             text = self.config_error
         elif self.checking:
             text = "Checking for new episodes…"
+        elif self.qb_online and self.search_plugins_enabled is False:
+            text = "Automatic searches are waiting for an enabled search plugin."
         elif self.qb_online:
             due = datetime.fromtimestamp(self.last_check + CHECK_EVERY)
             text = f"qBittorrent is running. Next automatic check at {due:%H:%M}."
@@ -604,17 +618,20 @@ class App(tk.Tk):
         while True:
             tidy = time.monotonic() - last_tidy >= TIDY_EVERY
             error = None
+            plugins_enabled = None
             try:
                 online = self.engine.poll(tidy=tidy)
+                plugins_enabled = self.engine.search_plugins_enabled
             except (OSError, ValueError) as problem:
                 online = None
                 error = f"Could not read series.json: {problem}"
             if tidy:
                 last_tidy = time.monotonic()
-            self.results.put(lambda online=online, error=error: self.qbittorrent_seen(online, error))
+            self.results.put(lambda online=online, error=error, plugins_enabled=plugins_enabled:
+                             self.qbittorrent_seen(online, error, plugins_enabled))
             time.sleep(POLL_EVERY)
 
-    def qbittorrent_seen(self, online, error=None):
+    def qbittorrent_seen(self, online, error=None, plugins_enabled=None):
         if error:
             self.config_retry = True
             self.config_error = error
@@ -622,12 +639,20 @@ class App(tk.Tk):
             self.show_status()
             return
         was_online = self.qb_online
+        previous_plugins = self.search_plugins_enabled
         self.qb_online = online
+        self.search_plugins_enabled = plugins_enabled if online else None
+        if self.search_plugins_enabled is False:
+            self.plugin_notice.pack(fill="x", before=self.panes)
+        else:
+            self.plugin_notice.pack_forget()
         if online and not was_online:
             # qBittorrent has just opened (or the watcher has): show and check.
             self.show_window()
-            self.check_now()
-        elif online and time.time() - self.last_check >= CHECK_EVERY:
+            if plugins_enabled is not False:
+                self.check_now()
+        elif online and plugins_enabled is not False and (
+                previous_plugins is False or time.time() - self.last_check >= CHECK_EVERY):
             self.check_now()
         elif was_online and not online and self.autostart.get():
             self.withdraw()  # qBittorrent closed; wait out of sight

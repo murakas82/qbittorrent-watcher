@@ -8,6 +8,23 @@ import urllib.request
 import uuid
 
 
+NO_SEARCH_PLUGINS = "No search plugins are enabled in qBittorrent."
+SEARCH_PLUGIN_HELP = (
+    NO_SEARCH_PLUGINS + "\n\n"
+    "1. Open qBittorrent and choose View > Search Engine.\n"
+    "2. Open the Search tab and click Search plugins...\n"
+    "3. Enable at least one installed plugin. If the list is empty, click "
+    "Install a new one to install a search plugin, then enable it.\n\n"
+    "Installation guide:\n"
+    "https://github.com/qbittorrent/search-plugins/wiki/Install-search-plugins\n\n"
+    "The watcher detects enabled plugins automatically and resumes searching."
+)
+
+
+class NoSearchPluginsError(ValueError):
+    """A search cannot start until a qBittorrent search plugin is enabled."""
+
+
 class QBittorrent:
     def __init__(self, base_url):
         self.base = base_url.rstrip("/") + "/api/v2/"
@@ -23,8 +40,18 @@ class QBittorrent:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8", errors="replace")
 
+    def has_enabled_search_plugins(self, timeout=3):
+        plugins = json.loads(self.call("search/plugins", timeout=timeout))
+        if (not isinstance(plugins, list)
+                or any(not isinstance(plugin, dict) or type(plugin.get("enabled")) is not bool
+                       for plugin in plugins)):
+            raise ValueError("qBittorrent returned an invalid search plugin list")
+        return any(plugin["enabled"] for plugin in plugins)
+
     def search(self, pattern, timeout):
         """Run a search with all enabled plugins and return the result rows."""
+        if not self.has_enabled_search_plugins():
+            raise NoSearchPluginsError(SEARCH_PLUGIN_HELP)
         job = json.loads(
             self.call(
                 "search/start",

@@ -10,10 +10,28 @@ from unittest.mock import patch
 
 import watcher
 from engine import WatcherEngine
+from qb_client import QBittorrent
 from store import ConfigStore
 
 
 class CliTests(unittest.TestCase):
+    def test_no_enabled_plugins_prints_actionable_message_and_returns_failure(self):
+        with tempfile.TemporaryDirectory(prefix="watcher-cli-tests-") as directory:
+            store = ConfigStore(Path(directory) / "series.json")
+            store.add_series(dict(name="Example Show", season=1, next_episode=1))
+            before = store.path.read_bytes()
+            qb = QBittorrent("http://localhost:8080")
+            engine = WatcherEngine(store, lambda url: qb)
+            output = io.StringIO()
+            with patch.object(qb, "call", side_effect=["v5.3.0", "[]", "[]"]) as call, \
+                 patch.object(watcher, "WatcherEngine", return_value=engine), \
+                 contextlib.redirect_stdout(output):
+                self.assertEqual(watcher.main(["--dry-run"]), 1)
+            self.assertIn("No search plugins are enabled", output.getvalue())
+            self.assertIn("View > Search Engine", output.getvalue())
+            self.assertNotIn("search/start", [item.args[0] for item in call.call_args_list])
+            self.assertEqual(store.path.read_bytes(), before)
+
     def test_entry_point_runs_shared_engine_with_empty_isolated_store(self):
         with tempfile.TemporaryDirectory(prefix="watcher-cli-tests-") as directory:
             store = ConfigStore(Path(directory) / "series.json")

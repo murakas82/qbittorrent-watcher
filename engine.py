@@ -6,7 +6,7 @@ import urllib.error
 from datetime import datetime
 
 from matching import find_episode, magnet_hash, pick_candidates
-from qb_client import QBittorrent, apply_download_limit
+from qb_client import NoSearchPluginsError, QBittorrent, apply_download_limit
 from store import ConfigStore, FileLock
 
 MAX_EPISODES_PER_RUN = 30
@@ -87,6 +87,7 @@ class WatcherEngine:
         self.logger = logger
         self.max_episodes = max_episodes
         self.log_file = self.store.path.parent / "watcher.log"
+        self.search_plugins_enabled = None  # latest probe: True, False, or unknown
 
     def log(self, message):
         if self.logger is not None:
@@ -127,6 +128,7 @@ class WatcherEngine:
         # A storage failure says nothing about qBittorrent's availability.
         # Let the GUI report it without triggering an offline transition.
         config = self.store.load()
+        self.search_plugins_enabled = None
         try:
             qb = self.client_factory(config["qbittorrent_url"])
             qb.call("app/version", timeout=3)
@@ -134,6 +136,12 @@ class WatcherEngine:
             return True  # running but refusing us; the check reports the error
         except (urllib.error.URLError, OSError):
             return False
+        try:
+            self.search_plugins_enabled = qb.has_enabled_search_plugins()
+        except (OSError, ValueError):
+            # An unavailable plugin list does not mean the client is offline
+            # or that its plugins are disabled. A check reports search errors.
+            pass
         if tidy:
             self.cleanup(qb=qb)
         return True
@@ -236,6 +244,9 @@ class WatcherEngine:
                 try:
                     already_there = in_client(qb, show)
                     results = [] if already_there else search_episode(qb, show, timeout)
+                except NoSearchPluginsError as error:
+                    self.log(str(error))
+                    return 1
                 except (urllib.error.URLError, OSError, ValueError, KeyError) as error:
                     self.log(f"{label}: search failed ({error})")
                     break

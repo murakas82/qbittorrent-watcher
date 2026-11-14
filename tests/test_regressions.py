@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import engine as w
 from matching import name_matches
+from qb_client import NoSearchPluginsError, SEARCH_PLUGIN_HELP
 from store import ConfigStore
 
 
@@ -15,6 +16,7 @@ class FakeQB:
         self.added = []
         self.deleted = []
         self.client = []
+        self.search_plugins_enabled = True
 
     def call(self, endpoint, params=None, **kwargs):
         if endpoint == "torrents/delete":
@@ -23,6 +25,9 @@ class FakeQB:
 
     def torrents(self):
         return list(self.client)
+
+    def has_enabled_search_plugins(self):
+        return self.search_plugins_enabled
 
     def search(self, pattern, timeout):
         return [dict(fileName=pattern + ".1080p", fileUrl="magnet:?xt=" + str(i),
@@ -165,6 +170,35 @@ class ReviewRegressions(unittest.TestCase):
         finally:
             lock.release()
         self.assertEqual(self.qb.deleted, ["ours"])
+
+    def test_no_enabled_plugins_stops_searches_with_setup_instructions(self):
+        before = self.store.path.read_bytes()
+        self.engine.logger = Mock()
+        with patch.object(self.qb, "search", side_effect=NoSearchPluginsError(SEARCH_PLUGIN_HELP)) as search:
+            self.assertEqual(self.engine.check(), 1)
+        search.assert_called_once()
+        self.engine.logger.assert_called_once_with(SEARCH_PLUGIN_HELP)
+        self.assertEqual(self.qb.added, [])
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_disabled_plugins_do_not_stop_connectivity_or_cleanup(self):
+        self.qb.search_plugins_enabled = False
+        self.store.record_download(self.show, "owned", "ours")
+        self.qb.client = [dict(hash="ours", progress=1, state="stalledUP")]
+        self.assertTrue(self.engine.poll(tidy=True))
+        self.assertFalse(self.engine.search_plugins_enabled)
+        self.assertEqual(self.qb.deleted, ["ours"])
+        self.qb.search_plugins_enabled = True
+        self.assertTrue(self.engine.poll())
+        self.assertTrue(self.engine.search_plugins_enabled)
+
+    def test_unavailable_plugin_list_does_not_mean_offline_or_disabled(self):
+        self.engine.search_plugins_enabled = False
+        for error in (OSError("unavailable"), ValueError("invalid plugin response")):
+            with self.subTest(error=error), \
+                 patch.object(self.qb, "has_enabled_search_plugins", side_effect=error):
+                self.assertTrue(self.engine.poll())
+                self.assertIsNone(self.engine.search_plugins_enabled)
 
     def test_exact_magnet_identity_wins_over_manual_match(self):
         torrent_hash = "a" * 40

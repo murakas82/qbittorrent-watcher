@@ -208,6 +208,14 @@ stay independent of the window, and schedules cleanup separately every
 
 ## Troubleshooting
 
+- **"No search plugins are enabled in qBittorrent"** – in qBittorrent, choose
+  **View > Search Engine**, open the **Search** tab, and click **Search
+  plugins…**. Enable at least one installed plugin. If the list is empty, click
+  **Install a new one** and follow the [qBittorrent installation
+  guide](https://github.com/qbittorrent/search-plugins/wiki/Install-search-plugins).
+  The watcher shows a **How to fix…** button and resumes searches automatically
+  when a plugin is enabled. Completed downloads are still cleaned up while
+  searches are waiting.
 - **"qBittorrent refused the connection (403)"** – tick *Bypass authentication
   for clients on localhost* in the Web UI options.
 - **"Could not reach qBittorrent"** – qBittorrent is not running, the Web UI is

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from engine import WatcherEngine
-from qb_client import QBittorrent
+from qb_client import NoSearchPluginsError, QBittorrent
 from store import ConfigStore
 
 
@@ -16,6 +16,36 @@ class ClientTests(unittest.TestCase):
         self.qb = QBittorrent("http://localhost:8080")
         self.row = dict(fileUrl="https://example.test/page", engineName="example",
                         fileName="Example.Show.S01E01.1080p", nbSeeders=10)
+
+    def test_search_without_enabled_plugins_reports_setup_steps_before_starting(self):
+        for plugins in ([], [dict(name="example", enabled=False)]):
+            with self.subTest(plugins=plugins):
+                self.qb.call = Mock(return_value=json.dumps(plugins))
+                with self.assertRaises(NoSearchPluginsError) as raised:
+                    self.qb.search("Example Show S01E01", 90)
+                message = str(raised.exception)
+                self.assertIn("No search plugins are enabled", message)
+                self.assertIn("View > Search Engine", message)
+                self.assertIn("Install a new one", message)
+                self.qb.call.assert_called_once_with("search/plugins", timeout=3)
+
+    def test_search_runs_when_at_least_one_plugin_is_enabled(self):
+        plugins = [dict(name="disabled", enabled=False), dict(name="enabled", enabled=True)]
+        self.qb.call = Mock(side_effect=[json.dumps(plugins), '{"id":1}',
+                                        '[{"status":"Stopped"}]', '{"results":[]}', ""])
+        self.assertEqual(self.qb.search("Example Show S01E01", 90), [])
+        self.assertEqual([call.args[0] for call in self.qb.call.call_args_list],
+                         ["search/plugins", "search/start", "search/status", "search/results", "search/delete"])
+
+    def test_invalid_plugin_list_is_not_reported_as_no_enabled_plugins(self):
+        for response in ('{"error":"unavailable"}', '[{"name":"example"}]',
+                         '[{"enabled":"false"}]', "not JSON"):
+            with self.subTest(response=response):
+                self.qb.call = Mock(return_value=response)
+                with self.assertRaises(ValueError) as raised:
+                    self.qb.search("Example Show S01E01", 90)
+                self.assertNotIsInstance(raised.exception, NoSearchPluginsError)
+                self.assertEqual(self.qb.call.call_count, 1)
 
     def test_plugin_add_carries_folder_and_unique_tag_through_the_plugin(self):
         self.qb.call = Mock(side_effect=["2.13.1", "", ""])
@@ -65,6 +95,8 @@ class ClientTests(unittest.TestCase):
                 return "v5.3.0"
             if endpoint == "app/webapiVersion":
                 return "2.16.2"
+            if endpoint == "search/plugins":
+                return '[{"name":"example","enabled":true}]'
             if endpoint == "search/start":
                 return '{"id":1}'
             if endpoint == "search/status":
