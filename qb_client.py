@@ -40,7 +40,12 @@ class QBittorrent:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8", errors="replace")
 
-    def has_enabled_search_plugins(self, timeout=3):
+    def has_enabled_search_plugins(self, timeout=30):
+        """True if at least one search plugin is enabled in qBittorrent.
+
+        Raises OSError if qBittorrent does not answer, and ValueError if its
+        answer is not a plugin list, so "unknown" is never read as "none".
+        """
         plugins = json.loads(self.call("search/plugins", timeout=timeout))
         if (not isinstance(plugins, list)
                 or any(not isinstance(plugin, dict) or type(plugin.get("enabled")) is not bool
@@ -49,9 +54,11 @@ class QBittorrent:
         return any(plugin["enabled"] for plugin in plugins)
 
     def search(self, pattern, timeout):
-        """Run a search with all enabled plugins and return the result rows."""
-        if not self.has_enabled_search_plugins():
-            raise NoSearchPluginsError(SEARCH_PLUGIN_HELP)
+        """Run a search with all enabled plugins and return the result rows.
+
+        Whether any plugin is enabled is checked once per check by the engine,
+        not here, so a slow plugin list cannot fail every single search.
+        """
         job = json.loads(
             self.call(
                 "search/start",

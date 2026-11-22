@@ -29,7 +29,7 @@ try:
 except ImportError:
     winreg = None
 
-from engine import WatcherEngine
+from engine import NO_PLUGINS_EXIT, WatcherEngine
 from qb_client import NO_SEARCH_PLUGINS, SEARCH_PLUGIN_HELP
 from store import ConfigStore, HERE
 
@@ -260,7 +260,8 @@ class App(tk.Tk):
         self.pause_button.pack(side="left", padx=(6, 0))
         self.remove_button = ttk.Button(toolbar, text="Remove", command=self.remove)
         self.remove_button.pack(side="left", padx=(6, 0))
-        self.check_button = ttk.Button(toolbar, text="Check now", command=self.check_now)
+        self.check_button = ttk.Button(toolbar, text="Check now",
+                                       command=lambda: self.check_now(manual=True))
         self.check_button.pack(side="right")
         self.saved_limit = 0
         self.max_downloads = tk.StringVar(value="0")
@@ -553,11 +554,16 @@ class App(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def check_now(self):
+    def check_now(self, manual=False):
+        """Start a check in the background.
+
+        Automatic checks wait while no search plugin is known to be enabled.
+        A click on Check now always runs: the plugin state shown may be a few
+        seconds old, and the check itself finds out and reports it.
+        """
         if self.checking:
             return
-        if self.search_plugins_enabled is False:
-            self.search_plugin_help()
+        if not manual and self.search_plugins_enabled is False:
             return
         self.checking = True
         self.last_check = time.time()
@@ -576,20 +582,36 @@ class App(tk.Tk):
                     env=dict(os.environ, PYTHONIOENCODING="utf-8"),
                     creationflags=NO_WINDOW,
                 )
-                problem = done.stderr.strip() if done.returncode not in (0, 1) else ""
+                no_plugins = done.returncode == NO_PLUGINS_EXIT
+                problem = (done.stderr.strip()
+                           if done.returncode not in (0, 1, NO_PLUGINS_EXIT) else "")
             except OSError as error:
+                no_plugins = False
                 problem = str(error)
-            self.results.put(lambda: self.check_finished(problem))
+            self.results.put(lambda: self.check_finished(problem, no_plugins, manual))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def check_finished(self, problem):
+    def check_finished(self, problem, no_plugins=False, manual=False):
         self.checking = False
         self.check_button.configure(state="normal", text="Check now")
+        if no_plugins:
+            # The check found no enabled search plugin: show the notice now,
+            # rather than waiting for the next probe.
+            self.search_plugins_enabled = False
+            self.update_plugin_notice()
         self.refresh(force=True)
         self.show_status()
         if problem:
             messagebox.showerror("Check failed", problem[-1500:], parent=self)
+        elif no_plugins and manual:
+            self.search_plugin_help()
+
+    def update_plugin_notice(self):
+        if self.search_plugins_enabled is False:
+            self.plugin_notice.pack(fill="x", before=self.panes)
+        else:
+            self.plugin_notice.pack_forget()
 
     # ---- background updates ----------------------------------------------
 
@@ -641,18 +663,23 @@ class App(tk.Tk):
         was_online = self.qb_online
         previous_plugins = self.search_plugins_enabled
         self.qb_online = online
-        self.search_plugins_enabled = plugins_enabled if online else None
-        if self.search_plugins_enabled is False:
-            self.plugin_notice.pack(fill="x", before=self.panes)
-        else:
-            self.plugin_notice.pack_forget()
+        if not online:
+            self.search_plugins_enabled = None
+        elif plugins_enabled is not None:
+            self.search_plugins_enabled = plugins_enabled
+        # A probe that could not read the plugin list (None) keeps the last
+        # known answer, so one timeout neither hides the notice nor starts a
+        # check while plugins are still disabled.
+        self.update_plugin_notice()
+        plugins = self.search_plugins_enabled
         if online and not was_online:
             # qBittorrent has just opened (or the watcher has): show and check.
             self.show_window()
-            if plugins_enabled is not False:
+            if plugins is not False:
                 self.check_now()
-        elif online and plugins_enabled is not False and (
-                previous_plugins is False or time.time() - self.last_check >= CHECK_EVERY):
+        elif online and previous_plugins is False and plugins is True:
+            self.check_now()  # a plugin has just been enabled: resume at once
+        elif online and plugins is not False and time.time() - self.last_check >= CHECK_EVERY:
             self.check_now()
         elif was_online and not online and self.autostart.get():
             self.withdraw()  # qBittorrent closed; wait out of sight

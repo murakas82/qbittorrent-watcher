@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from engine import WatcherEngine
-from qb_client import NoSearchPluginsError, QBittorrent
+from qb_client import SEARCH_PLUGIN_HELP, NoSearchPluginsError, QBittorrent
 from store import ConfigStore
 
 
@@ -17,25 +17,26 @@ class ClientTests(unittest.TestCase):
         self.row = dict(fileUrl="https://example.test/page", engineName="example",
                         fileName="Example.Show.S01E01.1080p", nbSeeders=10)
 
-    def test_search_without_enabled_plugins_reports_setup_steps_before_starting(self):
-        for plugins in ([], [dict(name="example", enabled=False)]):
+    def test_plugin_probe_reports_whether_any_plugin_is_enabled(self):
+        cases = (([], False), ([dict(name="example", enabled=False)], False),
+                 ([dict(name="off", enabled=False), dict(name="on", enabled=True)], True))
+        for plugins, expected in cases:
             with self.subTest(plugins=plugins):
                 self.qb.call = Mock(return_value=json.dumps(plugins))
-                with self.assertRaises(NoSearchPluginsError) as raised:
-                    self.qb.search("Example Show S01E01", 90)
-                message = str(raised.exception)
-                self.assertIn("No search plugins are enabled", message)
-                self.assertIn("View > Search Engine", message)
-                self.assertIn("Install a new one", message)
-                self.qb.call.assert_called_once_with("search/plugins", timeout=3)
+                self.assertIs(self.qb.has_enabled_search_plugins(timeout=90), expected)
+                self.qb.call.assert_called_once_with("search/plugins", timeout=90)
 
-    def test_search_runs_when_at_least_one_plugin_is_enabled(self):
-        plugins = [dict(name="disabled", enabled=False), dict(name="enabled", enabled=True)]
-        self.qb.call = Mock(side_effect=[json.dumps(plugins), '{"id":1}',
-                                        '[{"status":"Stopped"}]', '{"results":[]}', ""])
+    def test_help_text_explains_how_to_enable_plugins(self):
+        message = str(NoSearchPluginsError(SEARCH_PLUGIN_HELP))
+        self.assertIn("No search plugins are enabled", message)
+        self.assertIn("View > Search Engine", message)
+        self.assertIn("Install a new one", message)
+
+    def test_search_does_not_ask_for_the_plugin_list_each_time(self):
+        self.qb.call = Mock(side_effect=['{"id":1}', '[{"status":"Stopped"}]', '{"results":[]}', ""])
         self.assertEqual(self.qb.search("Example Show S01E01", 90), [])
         self.assertEqual([call.args[0] for call in self.qb.call.call_args_list],
-                         ["search/plugins", "search/start", "search/status", "search/results", "search/delete"])
+                         ["search/start", "search/status", "search/results", "search/delete"])
 
     def test_invalid_plugin_list_is_not_reported_as_no_enabled_plugins(self):
         for response in ('{"error":"unavailable"}', '[{"name":"example"}]',
@@ -43,7 +44,7 @@ class ClientTests(unittest.TestCase):
             with self.subTest(response=response):
                 self.qb.call = Mock(return_value=response)
                 with self.assertRaises(ValueError) as raised:
-                    self.qb.search("Example Show S01E01", 90)
+                    self.qb.has_enabled_search_plugins()
                 self.assertNotIsInstance(raised.exception, NoSearchPluginsError)
                 self.assertEqual(self.qb.call.call_count, 1)
 

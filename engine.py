@@ -6,10 +6,14 @@ import urllib.error
 from datetime import datetime
 
 from matching import find_episode, magnet_hash, pick_candidates
-from qb_client import NoSearchPluginsError, QBittorrent, apply_download_limit
+from qb_client import (SEARCH_PLUGIN_HELP, NoSearchPluginsError, QBittorrent,
+                       apply_download_limit)
 from store import ConfigStore, FileLock
 
 MAX_EPISODES_PER_RUN = 30
+# Exit code of a check that stopped because no search plugin is enabled, so
+# the window can tell it apart from "qBittorrent unreachable" (1).
+NO_PLUGINS_EXIT = 3
 ADD_WAIT_SECONDS = 45
 DOWNLOAD_SETTINGS = ("name", "season", "next_episode", "quality", "min_seeders",
                      "must_not_contain", "save_path", "part_of_title")
@@ -137,8 +141,10 @@ class WatcherEngine:
         except (urllib.error.URLError, OSError):
             return False
         try:
-            self.search_plugins_enabled = qb.has_enabled_search_plugins()
-        except (OSError, ValueError):
+            self.search_plugins_enabled = qb.has_enabled_search_plugins(timeout=3)
+        except (OSError, ValueError, AttributeError):
+            # AttributeError: a client without the plugin probe (tests, custom
+            # clients) must not stop the window's monitor thread.
             # An unavailable plugin list does not mean the client is offline
             # or that its plugins are disabled. A check reports search errors.
             pass
@@ -227,6 +233,19 @@ class WatcherEngine:
 
         self.cleanup(qb=qb, dry_run=dry_run)
 
+        # Ask once per check whether any search plugin is enabled, with the
+        # same patience as a search. Only a clear "none" stops the check; if
+        # the list cannot be read, the searches go ahead as they always did.
+        if any(show.get("enabled", True) for show in config["series"]):
+            try:
+                plugins_enabled = qb.has_enabled_search_plugins(timeout=timeout)
+            except (urllib.error.URLError, OSError, ValueError, AttributeError) as error:
+                self.log(f"Could not read qBittorrent's search plugins ({error}); searching anyway")
+                plugins_enabled = None
+            if plugins_enabled is False:
+                self.log(SEARCH_PLUGIN_HELP)
+                return NO_PLUGINS_EXIT
+
         for show in config["series"]:
             if not show.get("enabled", True):
                 continue
@@ -246,7 +265,7 @@ class WatcherEngine:
                     results = [] if already_there else search_episode(qb, show, timeout)
                 except NoSearchPluginsError as error:
                     self.log(str(error))
-                    return 1
+                    return NO_PLUGINS_EXIT
                 except (urllib.error.URLError, OSError, ValueError, KeyError) as error:
                     self.log(f"{label}: search failed ({error})")
                     break

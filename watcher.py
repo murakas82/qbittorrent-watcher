@@ -4,6 +4,9 @@ python watcher.py                    search and add new episodes
 python watcher.py --dry-run          search without adding or removing torrents
 python watcher.py --install-schedule install the hourly Windows task
 python watcher.py --remove-schedule  remove the hourly Windows task
+
+Exit codes: 0 done, 1 qBittorrent not reachable, 2 watch list unreadable,
+3 no search plugin enabled in qBittorrent.
 """
 
 import argparse

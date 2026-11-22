@@ -17,6 +17,7 @@ class FakeQB:
         self.deleted = []
         self.client = []
         self.search_plugins_enabled = True
+        self.plugin_probes = []
 
     def call(self, endpoint, params=None, **kwargs):
         if endpoint == "torrents/delete":
@@ -26,7 +27,8 @@ class FakeQB:
     def torrents(self):
         return list(self.client)
 
-    def has_enabled_search_plugins(self):
+    def has_enabled_search_plugins(self, timeout=30):
+        self.plugin_probes.append(timeout)
         return self.search_plugins_enabled
 
     def search(self, pattern, timeout):
@@ -174,9 +176,10 @@ class ReviewRegressions(unittest.TestCase):
     def test_no_enabled_plugins_stops_searches_with_setup_instructions(self):
         before = self.store.path.read_bytes()
         self.engine.logger = Mock()
-        with patch.object(self.qb, "search", side_effect=NoSearchPluginsError(SEARCH_PLUGIN_HELP)) as search:
-            self.assertEqual(self.engine.check(), 1)
-        search.assert_called_once()
+        self.qb.search_plugins_enabled = False
+        with patch.object(self.qb, "search") as search:
+            self.assertEqual(self.engine.check(), w.NO_PLUGINS_EXIT)
+        search.assert_not_called()
         self.engine.logger.assert_called_once_with(SEARCH_PLUGIN_HELP)
         self.assertEqual(self.qb.added, [])
         self.assertEqual(self.store.path.read_bytes(), before)
@@ -358,3 +361,33 @@ class ReviewRegressions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PluginProbeRegressions(unittest.TestCase):
+    """The plugin list is read once per check, patiently, and never decides alone."""
+
+    setUp = ReviewRegressions.setUp
+
+    def test_plugins_are_checked_once_per_check_with_the_search_timeout(self):
+        self.engine.max_episodes = 5
+        with patch.object(w, "wait_for_added", return_value=(None, False)):
+            self.engine.check()
+        self.assertEqual(self.qb.plugin_probes, [90])
+
+    def test_unreadable_plugin_list_does_not_stop_searches(self):
+        self.engine.logger = Mock()
+        with patch.object(self.qb, "has_enabled_search_plugins", side_effect=OSError("timed out")),              patch.object(self.qb, "search", return_value=[]) as search:
+            self.assertEqual(self.engine.check(), 0)
+        search.assert_called()
+        self.assertIn("searching anyway", self.engine.logger.call_args_list[0].args[0])
+
+    def test_client_without_plugin_probe_does_not_break_polling(self):
+        class OldClient:
+            def call(self, endpoint, params=None, **kwargs):
+                return "v5.0"
+
+            def torrents(self):
+                return []
+        self.engine.client_factory = lambda url: OldClient()
+        self.assertTrue(self.engine.poll())
+        self.assertIsNone(self.engine.search_plugins_enabled)

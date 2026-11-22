@@ -26,7 +26,7 @@ class CliTests(unittest.TestCase):
             with patch.object(qb, "call", side_effect=["v5.3.0", "[]", "[]"]) as call, \
                  patch.object(watcher, "WatcherEngine", return_value=engine), \
                  contextlib.redirect_stdout(output):
-                self.assertEqual(watcher.main(["--dry-run"]), 1)
+                self.assertEqual(watcher.main(["--dry-run"]), 3)
             self.assertIn("No search plugins are enabled", output.getvalue())
             self.assertIn("View > Search Engine", output.getvalue())
             self.assertNotIn("search/start", [item.args[0] for item in call.call_args_list])

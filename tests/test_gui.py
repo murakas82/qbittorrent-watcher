@@ -145,14 +145,43 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(self.app.plugin_notice.winfo_manager(), "")
             check.assert_called_once()
 
-    def test_manual_check_with_no_plugins_shows_help_without_starting_worker(self):
+    def test_automatic_check_waits_while_plugins_are_disabled(self):
         self.app.search_plugins_enabled = False
-        with patch.object(gui.messagebox, "showinfo") as help_message, \
-             patch.object(gui.threading, "Thread") as worker:
+        with patch.object(gui.threading, "Thread") as worker:
             self.app.check_now()
-        help_message.assert_called_once_with("Enable search plugins", gui.SEARCH_PLUGIN_HELP, parent=self.app)
         worker.assert_not_called()
         self.assertFalse(self.app.checking)
+
+    def test_manual_check_runs_even_if_plugins_looked_disabled(self):
+        # The user may have just enabled a plugin; the shown state can be stale.
+        self.app.search_plugins_enabled = False
+        with patch.object(gui.threading, "Thread") as worker:
+            self.app.check_now(manual=True)
+        worker.assert_called_once()
+        self.assertTrue(self.app.checking)
+
+    def test_check_stopped_for_missing_plugins_is_reported(self):
+        self.app.qb_online = True
+        self.app.search_plugins_enabled = True
+        self.app.checking = True
+        with patch.object(gui.messagebox, "showinfo") as help_message:
+            self.app.check_finished("", no_plugins=True, manual=False)
+            help_message.assert_not_called()  # automatic: notice only, no pop-up
+            self.assertEqual(self.app.plugin_notice.winfo_manager(), "pack")
+            self.assertIn("waiting for an enabled search plugin", self.app.status.get())
+            self.app.check_finished("", no_plugins=True, manual=True)
+        help_message.assert_called_once_with("Enable search plugins", gui.SEARCH_PLUGIN_HELP, parent=self.app)
+
+    def test_unreadable_plugin_list_keeps_disabled_state_and_starts_no_check(self):
+        self.app.last_check = time.time()
+        with patch.object(self.app, "check_now") as check, patch.object(self.app, "show_window"):
+            self.app.qbittorrent_seen(True, plugins_enabled=False)
+            self.app.qbittorrent_seen(True, plugins_enabled=None)  # probe timed out
+            check.assert_not_called()
+            self.assertEqual(self.app.plugin_notice.winfo_manager(), "pack")
+            self.assertFalse(self.app.search_plugins_enabled)
+            self.app.qbittorrent_seen(True, plugins_enabled=True)
+        check.assert_called_once()
 
     def test_unknown_plugin_status_does_not_show_disabled_notice(self):
         self.app.qb_online = True
