@@ -85,8 +85,11 @@ class QBittorrent:
             except (urllib.error.URLError, OSError):
                 pass
 
-    def add(self, row, save_path):
+    def add(self, row, save_path, content_layout=None):
         """Submit a result; return its unique confirmation tag for page links.
+
+        content_layout is qBittorrent's per-torrent choice: "Original",
+        "Subfolder" or "NoSubfolder" (files go straight into save_path).
 
         The plugin runs inside qBittorrent, with the same per-download settings
         as a magnet. Only this submission receives the returned tag, so a
@@ -109,6 +112,8 @@ class QBittorrent:
             params.update(downloader=plugin, tags=tag)
         if save_path:
             params.update(savepath=save_path, autoTMM="false")
+        if content_layout:
+            params["contentLayout"] = content_layout
         self.call("torrents/add", params, post=True)
         return tag
 

@@ -1,7 +1,7 @@
 # qBittorrent Watcher
 
-A small tool that watches for new episodes of the series you follow and adds
-them to qBittorrent automatically.
+A small tool that watches for new episodes of the series you follow, and for
+movies you are waiting for, and adds them to qBittorrent automatically.
 
 It searches through the search plugins you already have in qBittorrent's
 Search tab, so there are no indexers, RSS feeds or extra services to set up.
@@ -10,6 +10,8 @@ It uses Python's standard library, with no extra dependencies to install.
 ## What it does
 
 - Keeps a list of series, each with a season and the next episode to get.
+- Keeps a list of movies, each with its title and year, and downloads each one
+  once a release appears, then marks it as downloaded.
 - Opens together with qBittorrent, checks straight away and then every hour,
   searching for that episode through qBittorrent's search plugins.
 - Picks the release with the most seeders that matches your quality, and adds it.
@@ -63,14 +65,15 @@ window open.
 
 | Button | What it does |
 |---|---|
-| Add series… | Adds a series to watch. |
-| Edit… | Changes the selected series (or double-click it). |
-| Pause / Resume | Stops or restarts watching without removing the series. |
+| Add series… / Add movie… | Adds a series or a movie, depending on the tab in front. |
+| Edit… | Changes the selected series or movie (or double-click it). |
+| Pause / Resume | Stops or restarts watching without removing it. |
 | Remove | Stops watching and forgets the history. Files and torrents are not touched. |
 | Check now | Runs a search immediately instead of waiting for the hourly run. |
 
-The *Downloaded episodes* tab lists what the watcher has got for the selected
-series across all seasons, including replacement downloads. The table's
+The *Series* and *Movies* tabs hold the two lists; the buttons act on the tab
+in front. The *Downloaded* tab lists what the watcher has got for the selected
+series across all seasons, or for the selected movie, including replacement downloads. The table's
 *Downloaded* column shows episodes from the current season. The *Activity* tab
 shows the log.
 Dates in both tabs use `DD.MM.YYYY`, followed by the recorded time when present.
@@ -102,6 +105,7 @@ settings alone.
 - **Next episode to get** – earlier episodes are never downloaded. Lower this
   number if you want an old episode again.
 - **Quality** – a word that must be in the release name, such as `1080p`.
+  *4K (2160p)* accepts releases named `2160p`, `4K` or `UHD`.
 - **Minimum seeders** – releases with fewer seeders are ignored.
 - **Skip releases with** – words that rule a release out, such as `CAM`.
 - **Download folder** – leave empty to use qBittorrent's default folder.
@@ -121,6 +125,29 @@ downloads added by hand can appear in history without becoming managed.
 This requires Web API 2.13.1 or newer (included in qBittorrent 5.2 and later).
 Older clients still support magnet results and report an upgrade message for
 page-link results before submitting them.
+
+### Movies
+
+The *Movies* tab works like the series list, with these differences:
+
+- **Title and year** – both are required. A release is accepted only when its
+  name is the title followed by the year, so `Dune 2021` never picks up the
+  1984 film or `Dune Part Two`.
+- **Movie folder** – the box at the top of the tab sets where movies go. Each
+  movie gets its own folder in it, named `Title (Year)`, for example
+  `Movies\Dune (2021)`. The torrent's files go straight into that folder,
+  whether it is a single video file or a release with several files. A movie
+  can have its own folder instead, set in *Edit…*; it is then used exactly as
+  given.
+- **Stricter defaults** – new movies are often leaked first as cinema
+  recordings, so a new movie starts with a longer skip list (`CAM`, `TS`,
+  `TELESYNC`, `SCREENER` and similar), at least 5 seeders and 1080p.
+- **Done when downloaded** – once a movie is added, its status becomes
+  *Downloaded* and it is not searched for again. If it is already in
+  qBittorrent, it is marked as downloaded without adding a copy. To look for
+  it again, untick *Downloaded* in *Edit…*.
+- **Remove when finished** – on by default, as for new series. Only torrents
+  the watcher added itself are removed, and the files are kept.
 
 ## Running it without the window
 
@@ -163,6 +190,10 @@ An addition already submitted to qBittorrent is still recorded. Season packs
 are ignored, and moving to the next season is something you do yourself in
 *Edit…*.
 
+For each movie that is not yet downloaded, the watcher searches for
+`Title Year` and applies the same rules, with the title-and-year match in
+place of the episode number. Movies are checked after the series.
+
 Watch entries have stable IDs. Download records keep their own season,
 episode and torrent identity, so renaming a series or changing its season
 preserves history and pending cleanup. Removing a watch entry forgets its
@@ -171,9 +202,11 @@ records, as described in the window's confirmation message.
 ## Upgrading an existing watch list
 
 Close any old watcher window and let an ongoing check finish before replacing
-the program files. The first run upgrades `series.json` to schema version 2
-under the storage lock. It first saves an exact copy of the old file as
-`series.json.v1.bak` (using a unique suffix if that backup already exists).
+the program files. The first run upgrades `series.json` to the current schema
+version (3, which added movies) under the storage lock. It first saves an
+exact copy of the old file as `series.json.v1.bak` or `series.json.v2.bak`,
+named after the old version (using a unique suffix if that backup already
+exists).
 Settings, history and pending cleanup records are carried over automatically.
 Keep the backup if you need to return to an older version of the program.
 

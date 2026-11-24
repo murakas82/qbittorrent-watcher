@@ -29,9 +29,9 @@ try:
 except ImportError:
     winreg = None
 
-from engine import NO_PLUGINS_EXIT, WatcherEngine
+from engine import NO_PLUGINS_EXIT, WatcherEngine, movie_destination
 from qb_client import NO_SEARCH_PLUGINS, SEARCH_PLUGIN_HELP
-from store import ConfigStore, HERE
+from store import MOVIE_DEFAULTS, ConfigStore, HERE
 
 CHECK_EVERY = 3600  # seconds between automatic checks while qBittorrent runs
 POLL_EVERY = 5  # seconds between looks for qBittorrent
@@ -40,7 +40,18 @@ INSTANCE_PORT = 47821  # local port used to keep a single window running
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "qBittorrent Watcher"
 OLD_RUN_NAME = "qBittorrent Series Watcher"  # the program's earlier name
-QUALITIES = ["Any", "2160p", "1080p", "720p", "480p"]
+# (shown in the window, stored in series.json). 4K is stored as "2160p" and
+# also matches release names that say "4K" or "UHD".
+QUALITY_CHOICES = [("Any", ""), ("4K (2160p)", "2160p"), ("1080p", "1080p"),
+                   ("720p", "720p"), ("480p", "480p")]
+
+
+def quality_label(value):
+    return next((label for label, stored in QUALITY_CHOICES if stored == (value or "")), value)
+
+
+def quality_value(label):
+    return next((stored for shown, stored in QUALITY_CHOICES if shown == label), label)
 DEFAULT_SKIP = "CAM, HDCAM, TELESYNC, HDTS"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -86,7 +97,7 @@ class SeriesDialog(tk.Toplevel):
         self.name = tk.StringVar(value=show.get("name", ""))
         self.season = tk.StringVar(value=str(show.get("season", 1)))
         self.next_episode = tk.StringVar(value=str(show.get("next_episode", 1)))
-        self.quality = tk.StringVar(value=show.get("quality") or "Any" if show else "1080p")
+        self.quality = tk.StringVar(value=quality_label(show.get("quality", "")) if show else "1080p")
         self.min_seeders = tk.StringVar(value=str(show.get("min_seeders", 3)))
         skip = show.get("must_not_contain")
         self.skip = tk.StringVar(value=DEFAULT_SKIP if skip is None else ", ".join(skip))
@@ -120,7 +131,8 @@ class SeriesDialog(tk.Toplevel):
         row(
             3,
             "Quality",
-            ttk.Combobox(form, textvariable=self.quality, values=QUALITIES, state="readonly", width=10),
+            ttk.Combobox(form, textvariable=self.quality, values=[label for label, _ in QUALITY_CHOICES],
+                         state="readonly", width=12),
         )
         row(
             4,
@@ -191,18 +203,119 @@ class SeriesDialog(tk.Toplevel):
                 "Numbers", "Season, episode and seeders must be whole numbers.", parent=self
             )
             return
-        quality = self.quality.get()
         self.result = {
             "name": name,
             "season": season,
             "next_episode": next_episode,
-            "quality": "" if quality == "Any" else quality,
+            "quality": quality_value(self.quality.get()),
             "min_seeders": min_seeders,
             "must_not_contain": [w.strip() for w in self.skip.get().split(",") if w.strip()],
             "save_path": self.folder.get().strip(),
             "enabled": self.enabled.get(),
             "remove_when_done": self.remove_done.get(),
             "part_of_title": self.part_of_title.get(),
+        }
+        self.destroy()
+
+
+class MovieDialog(tk.Toplevel):
+    """Form for adding or editing one movie. Result is in self.result."""
+
+    def __init__(self, parent, movie=None, default_folder=""):
+        super().__init__(parent)
+        self.title("Edit movie" if movie else "Add movie")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.result = None
+        movie = movie or {}
+
+        self.name = tk.StringVar(value=movie.get("name", ""))
+        self.year = tk.StringVar(value=str(movie.get("year", datetime.now().year)))
+        self.quality = tk.StringVar(value=quality_label(movie.get("quality", "1080p")))
+        self.min_seeders = tk.StringVar(value=str(movie.get("min_seeders", MOVIE_DEFAULTS["min_seeders"])))
+        self.skip = tk.StringVar(value=", ".join(movie.get("must_not_contain", MOVIE_DEFAULTS["must_not_contain"])))
+        self.folder = tk.StringVar(value=movie.get("save_path", ""))
+        self.enabled = tk.BooleanVar(value=movie.get("enabled", True))
+        self.remove_done = tk.BooleanVar(value=movie.get("remove_when_done", True))
+        self.done = tk.BooleanVar(value=movie.get("done", False))
+
+        form = ttk.Frame(self, padding=16)
+        form.grid(sticky="nsew")
+        form.columnconfigure(1, weight=1)
+
+        def row(index, label, widget, hint=None):
+            ttk.Label(form, text=label).grid(row=index * 2, column=0, sticky="w", pady=(6, 0))
+            widget.grid(row=index * 2, column=1, sticky="ew", padx=(12, 0), pady=(6, 0))
+            if hint:
+                ttk.Label(form, text=hint, foreground="#666").grid(
+                    row=index * 2 + 1, column=1, sticky="w", padx=(12, 0))
+
+        name_entry = ttk.Entry(form, textvariable=self.name, width=42)
+        row(0, "Movie title", name_entry, "As it appears in torrent names, e.g. Example Movie")
+        row(1, "Year", ttk.Spinbox(form, from_=1900, to=2100, textvariable=self.year, width=6),
+            "Required: tells remakes and sequels apart")
+        row(2, "Quality", ttk.Combobox(form, textvariable=self.quality,
+                                       values=[label for label, _ in QUALITY_CHOICES],
+                                       state="readonly", width=12))
+        row(3, "Minimum seeders", ttk.Spinbox(form, from_=0, to=9999, textvariable=self.min_seeders, width=6))
+        row(4, "Skip releases with", ttk.Entry(form, textvariable=self.skip),
+            "Words separated by commas; skips cinema recordings")
+        folder_row = ttk.Frame(form)
+        folder_row.columnconfigure(0, weight=1)
+        ttk.Entry(folder_row, textvariable=self.folder).grid(row=0, column=0, sticky="ew")
+        ttk.Button(folder_row, text="Browse…", command=self.browse).grid(row=0, column=1, padx=(6, 0))
+        row(5, "Download folder", folder_row,
+            f"Leave empty for {default_folder}\\Title (Year)" if default_folder
+            else "Leave empty to use qBittorrent's default folder")
+        ttk.Checkbutton(form, text="Watch this movie", variable=self.enabled).grid(
+            row=14, column=1, sticky="w", padx=(12, 0), pady=(10, 0))
+        ttk.Checkbutton(form, text="Remove from qBittorrent when finished (files are kept)",
+                        variable=self.remove_done).grid(row=15, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+        if movie:
+            ttk.Checkbutton(form, text="Downloaded (untick to look for it again)",
+                            variable=self.done).grid(row=16, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+
+        buttons = ttk.Frame(form)
+        buttons.grid(row=18, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(buttons, text="Save", command=self.save, default="active").grid(row=0, column=1)
+        self.bind("<Return>", lambda event: self.save())
+        self.bind("<Escape>", lambda event: self.destroy())
+        name_entry.focus_set()
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.grab_set()
+
+    def browse(self):
+        chosen = filedialog.askdirectory(parent=self, initialdir=self.folder.get() or None)
+        if chosen:
+            self.folder.set(os.path.normpath(chosen))
+
+    def save(self):
+        name = self.name.get().strip()
+        if not name:
+            messagebox.showwarning("Movie title", "Type the title of the movie.", parent=self)
+            return
+        try:
+            year = int(self.year.get())
+            min_seeders = int(self.min_seeders.get())
+            if year < 1880 or min_seeders < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Numbers", "Year and seeders must be whole numbers.", parent=self)
+            return
+        self.result = {
+            "name": name,
+            "year": year,
+            "quality": quality_value(self.quality.get()),
+            "min_seeders": min_seeders,
+            "must_not_contain": [w.strip() for w in self.skip.get().split(",") if w.strip()],
+            "save_path": self.folder.get().strip(),
+            "enabled": self.enabled.get(),
+            "remove_when_done": self.remove_done.get(),
+            "done": self.done.get(),
         }
         self.destroy()
 
@@ -253,7 +366,8 @@ class App(tk.Tk):
 
         toolbar = ttk.Frame(self, padding=(12, 10, 12, 6))
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="Add series…", command=self.add).pack(side="left")
+        self.add_button = ttk.Button(toolbar, text="Add series…", command=self.add)
+        self.add_button.pack(side="left")
         self.edit_button = ttk.Button(toolbar, text="Edit…", command=self.edit)
         self.edit_button.pack(side="left", padx=(6, 0))
         self.pause_button = ttk.Button(toolbar, text="Pause", command=self.toggle)
@@ -310,9 +424,36 @@ class App(tk.Tk):
             "state": ("Status", 80, "center"),
             "folder": ("Download folder", 220, "w"),
         }
-        self.table = self.make_tree(panes, columns, height=7)
+        self.upper = ttk.Notebook(panes)
+        panes.add(self.upper, weight=3)
+        self.table = self.make_tree(self.upper, columns, height=7, notebook="Series")
         self.table.bind("<<TreeviewSelect>>", lambda event: self.selection_changed())
         self.table.bind("<Double-1>", lambda event: self.edit())
+
+        movies_tab = ttk.Frame(self.upper)
+        folder_row = ttk.Frame(movies_tab, padding=(0, 6, 0, 6))
+        folder_row.pack(fill="x")
+        ttk.Label(folder_row, text="Movie folder").pack(side="left")
+        self.movie_folder = tk.StringVar(value="")
+        self.saved_movie_folder = ""
+        self.movie_folder_box = ttk.Entry(folder_row, textvariable=self.movie_folder)
+        self.movie_folder_box.pack(side="left", fill="x", expand=True, padx=(8, 6))
+        self.movie_folder_box.bind("<Return>", lambda event: self.movie_folder_changed())
+        self.movie_folder_box.bind("<FocusOut>", lambda event: self.movie_folder_changed())
+        ttk.Button(folder_row, text="Browse…", command=self.browse_movie_folder).pack(side="left")
+        movie_columns = {
+            "name": ("Movie", 240, "w"),
+            "year": ("Year", 60, "center"),
+            "quality": ("Quality", 90, "center"),
+            "state": ("Status", 100, "center"),
+            "folder": ("Download folder", 260, "w"),
+        }
+        self.movie_table = self.make_tree(movies_tab, movie_columns, height=7)
+        self.movie_table.bind("<<TreeviewSelect>>", lambda event: self.selection_changed())
+        self.movie_table.bind("<Double-1>", lambda event: self.edit())
+        self.upper.add(movies_tab, text="Movies")
+        self.upper.bind("<<NotebookTabChanged>>", lambda event: self.selection_changed())
+        self.movies = []
 
         lower = ttk.Notebook(panes)
         panes.add(lower, weight=2)
@@ -321,7 +462,7 @@ class App(tk.Tk):
             "added": ("Added", 130, "center"),
             "title": ("Release", 560, "w"),
         }
-        self.history = self.make_tree(lower, history_columns, height=6, notebook="Downloaded episodes")
+        self.history = self.make_tree(lower, history_columns, height=6, notebook="Downloaded")
         log_frame = ttk.Frame(lower)
         self.log_text = tk.Text(log_frame, wrap="none", state="disabled", height=8, font=("Consolas", 9))
         log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
@@ -379,11 +520,26 @@ class App(tk.Tk):
         tree.pack(fill="both", expand=True)
         if notebook:
             parent.add(frame, text=notebook)
-        else:
+        elif isinstance(parent, ttk.PanedWindow):
             parent.add(frame, weight=3)
+        else:
+            frame.pack(fill="both", expand=True)
         return tree
 
     # ---- data -----------------------------------------------------------
+
+    def movies_shown(self):
+        """True while the Movies tab is the one in front."""
+        try:
+            return self.upper.index(self.upper.select()) == 1
+        except tk.TclError:
+            return False
+
+    def selected_movie(self):
+        chosen = self.movie_table.selection()
+        if not chosen:
+            return None
+        return next((movie for movie in self.movies if movie["id"] == chosen[0]), None)
 
     def selected(self):
         """The selected series as stored in self.shows, or None."""
@@ -417,7 +573,7 @@ class App(tk.Tk):
                 keep = self.table.selection()
                 self.table.delete(*self.table.get_children())
                 for show in self.shows:
-                    got = [d["episode"] for d in self.downloads if d["series_id"] == show["id"]
+                    got = [d["episode"] for d in self.downloads if d.get("series_id") == show["id"]
                            and d["season"] == show["season"] and d["episode"] is not None]
                     self.table.insert(
                         "",
@@ -428,7 +584,7 @@ class App(tk.Tk):
                             show["season"],
                             f"S{show['season']:02d}E{show['next_episode']:02d}",
                             episode_ranges(got) or "none yet",
-                            show.get("quality") or "Any",
+                            quality_label(show.get("quality", "")),
                             "Watching" if show.get("enabled", True) else "Paused",
                             show.get("save_path") or "(qBittorrent default)",
                         ),
@@ -437,6 +593,7 @@ class App(tk.Tk):
                     self.table.selection_set(keep[0])
                 elif self.shows:
                     self.table.selection_set(series_key(self.shows[0]))
+                self.fill_movies(config)
                 self.selection_changed()
                 self.show_status()
         except (OSError, ValueError) as error:
@@ -460,7 +617,60 @@ class App(tk.Tk):
             self.log_text.configure(state="disabled")
             self.log_text.see("end")
 
+    def fill_movies(self, config):
+        self.movies = config["movies"]
+        self.saved_movie_folder = config.get("movie_folder", "")
+        try:
+            editing = self.focus_get() is self.movie_folder_box
+        except KeyError:
+            editing = False
+        if not editing:
+            self.movie_folder.set(self.saved_movie_folder)
+        keep = self.movie_table.selection()
+        self.movie_table.delete(*self.movie_table.get_children())
+        for movie in self.movies:
+            state = ("Downloaded" if movie["done"] else
+                     "Waiting" if movie["enabled"] else "Paused")
+            self.movie_table.insert("", "end", iid=movie["id"], values=(
+                movie["name"], movie["year"], quality_label(movie["quality"]), state,
+                movie_destination(movie, config)[0] or "(qBittorrent default)"))
+        if keep and self.movie_table.exists(keep[0]):
+            self.movie_table.selection_set(keep[0])
+        elif self.movies:
+            self.movie_table.selection_set(self.movies[0]["id"])
+
+    def movie_folder_changed(self):
+        folder = self.movie_folder.get().strip()
+        if folder == self.saved_movie_folder:
+            return
+        if self.change(lambda: self.store.set_setting("movie_folder", folder)):
+            self.saved_movie_folder = folder
+
+    def browse_movie_folder(self):
+        chosen = filedialog.askdirectory(parent=self, initialdir=self.movie_folder.get() or None)
+        if chosen:
+            self.movie_folder.set(os.path.normpath(chosen))
+            self.movie_folder_changed()
+
     def selection_changed(self):
+        if self.movies_shown():
+            self.add_button.configure(text="Add movie…")
+            movie = self.selected_movie()
+            state = "normal" if movie else "disabled"
+            for button in (self.edit_button, self.pause_button, self.remove_button):
+                button.configure(state=state)
+            self.pause_button.configure(
+                text="Resume" if movie and not movie["enabled"] else "Pause")
+            self.history.heading("episode", text="Year")
+            self.history.delete(*self.history.get_children())
+            if movie:
+                for item in sorted((d for d in self.downloads if d.get("movie_id") == movie["id"]),
+                                   key=lambda d: d["added"], reverse=True):
+                    self.history.insert("", "end", values=(
+                        movie["year"], display_date(item["added"]), item["title"]))
+            return
+        self.add_button.configure(text="Add series…")
+        self.history.heading("episode", text="Episode")
         show = self.selected()
         state = "normal" if show else "disabled"
         for button in (self.edit_button, self.pause_button, self.remove_button):
@@ -470,7 +680,7 @@ class App(tk.Tk):
         )
         self.history.delete(*self.history.get_children())
         if show:
-            records = [d for d in self.downloads if d["series_id"] == show["id"]]
+            records = [d for d in self.downloads if d.get("series_id") == show["id"]]
             for item in sorted(records, key=lambda d: (d["season"] or 0, d["episode"] or 0, d["added"]), reverse=True):
                 tag = (f"S{item['season']:02d}E{item['episode']:02d}"
                        if item["season"] is not None and item["episode"] is not None
@@ -490,6 +700,13 @@ class App(tk.Tk):
     # ---- actions --------------------------------------------------------
 
     def add(self):
+        if self.movies_shown():
+            dialog = MovieDialog(self, default_folder=self.saved_movie_folder)
+            self.wait_window(dialog)
+            created = []
+            if dialog.result and self.change(lambda: created.append(self.store.add_movie(dialog.result))):
+                self.movie_table.selection_set(created[0])
+            return
         dialog = SeriesDialog(self)
         self.wait_window(dialog)
         if not dialog.result:
@@ -499,6 +716,14 @@ class App(tk.Tk):
             self.table.selection_set(created[0])
 
     def edit(self):
+        if self.movies_shown():
+            movie = self.selected_movie()
+            if movie:
+                dialog = MovieDialog(self, movie, default_folder=self.saved_movie_folder)
+                self.wait_window(dialog)
+                if dialog.result:
+                    self.change(lambda: self.store.edit_movie(movie["id"], dialog.result))
+            return
         old = self.selected()
         if not old:
             return
@@ -508,11 +733,25 @@ class App(tk.Tk):
             self.change(lambda: self.store.edit_series(old["id"], dialog.result, original=old))
 
     def toggle(self):
+        if self.movies_shown():
+            movie = self.selected_movie()
+            if movie:
+                self.change(lambda: self.store.toggle_movie(movie["id"]))
+            return
         show = self.selected()
         if show:
             self.change(lambda: self.store.toggle_series(show["id"]))
 
     def remove(self):
+        if self.movies_shown():
+            movie = self.selected_movie()
+            if movie and messagebox.askyesno(
+                    "Remove movie",
+                    f"Stop watching {movie['name']} ({movie['year']})?\n\n"
+                    "Downloaded files and torrents are not touched.",
+                    parent=self):
+                self.change(lambda: self.store.remove_movie(movie["id"]))
+            return
         show = self.selected()
         if not show:
             return

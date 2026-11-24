@@ -1,7 +1,8 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "qbittorrent_url": "http://127.0.0.1:8080",
   "search_timeout_seconds": 90,
+  "movie_folder": "",
   "series": [
     {
       "id": "example-show",
@@ -15,6 +16,20 @@
       "enabled": true,
       "remove_when_done": false,
       "part_of_title": false
+    }
+  ],
+  "movies": [
+    {
+      "id": "example-movie",
+      "name": "Example Movie",
+      "year": 2025,
+      "quality": "2160p",
+      "min_seeders": 5,
+      "must_not_contain": ["CAM", "HDCAM", "TS", "HDTS", "TELESYNC", "TC", "TELECINE", "SCR", "SCREENER", "DVDSCR"],
+      "save_path": "",
+      "enabled": true,
+      "remove_when_done": true,
+      "done": false
     }
   ],
   "downloads": []

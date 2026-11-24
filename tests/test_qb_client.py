@@ -61,6 +61,16 @@ class ClientTests(unittest.TestCase):
                 savepath="folder with spaces", autoTMM="false")))
             self.assertTrue(call.kwargs["post"])
 
+    def test_content_layout_is_passed_only_when_asked_for(self):
+        magnet = dict(self.row, fileUrl="magnet:?xt=urn:btih:" + "ab" * 20)
+        self.qb.call = Mock(return_value="")
+        self.qb.add(magnet, r"C:\Movies\Dune (2021)", "NoSubfolder")
+        self.qb.add(magnet, "folder")
+        first, second = self.qb.call.call_args_list
+        self.assertEqual(first.args[1]["contentLayout"], "NoSubfolder")
+        self.assertEqual(first.args[1]["savepath"], r"C:\Movies\Dune (2021)")
+        self.assertNotIn("contentLayout", second.args[1])
+
     def test_old_client_reports_upgrade_before_submitting_a_page_link(self):
         self.qb.call = Mock(return_value="2.13.0")
         with self.assertRaisesRegex(ValueError, "Please update qBittorrent"):

@@ -18,7 +18,7 @@ except ImportError:
     import fcntl
 
 HERE = Path(__file__).resolve().parent
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # 3 added movies
 
 
 class FileLock:
@@ -73,11 +73,27 @@ SERIES_DEFAULTS = {
 }
 SERIES_FIELDS = {"name", "season", "next_episode", *SERIES_DEFAULTS}
 
+# New movies often leak first as cinema recordings, so movies start with a
+# longer skip list and need more seeders than series.
+MOVIE_SKIP_DEFAULT = ["CAM", "HDCAM", "TS", "HDTS", "TELESYNC", "TC", "TELECINE",
+                      "SCR", "SCREENER", "DVDSCR"]
+MOVIE_DEFAULTS = {
+    "quality": "1080p", "min_seeders": 5, "must_not_contain": MOVIE_SKIP_DEFAULT,
+    "save_path": "", "enabled": True, "remove_when_done": True, "done": False,
+}
+MOVIE_FIELDS = {"name", "year", *MOVIE_DEFAULTS}
+
 
 def empty_config():
     return {"schema_version": SCHEMA_VERSION,
             "qbittorrent_url": "http://127.0.0.1:8080",
-            "search_timeout_seconds": 90, "series": [], "downloads": []}
+            "search_timeout_seconds": 90, "series": [], "movies": [], "downloads": []}
+
+
+def same_movie(a, b):
+    """Duplicate movies use the same normalized title and year."""
+    return (normalize(a["name"]).replace(" ", "") ==
+            normalize(b["name"]).replace(" ", "") and a["year"] == b["year"])
 
 
 def same_title(a, b):
@@ -108,8 +124,10 @@ def validate(config):
         _whole(result["max_downloads"], "max_downloads", 0)
     if "autostart" in result and type(result["autostart"]) is not bool:
         raise ValueError("autostart must be true or false")
-    if not isinstance(result["series"], list) or not isinstance(result["downloads"], list):
-        raise ValueError("series and downloads must be lists")
+    if "movie_folder" in result and not isinstance(result["movie_folder"], str):
+        raise ValueError("movie_folder must be text")
+    if not all(isinstance(result[key], list) for key in ("series", "movies", "downloads")):
+        raise ValueError("series, movies and downloads must be lists")
     seen = set()
     for show in result["series"]:
         if not isinstance(show, dict):
@@ -134,13 +152,40 @@ def validate(config):
             raise ValueError("must_not_contain must be a list of words")
         if "history" in show or "cleanup" in show:
             raise ValueError("Download history belongs in downloads")
+    movie_ids = set()
+    for movie in result["movies"]:
+        if not isinstance(movie, dict):
+            raise ValueError("Each movie must be an object")
+        for key, value in MOVIE_DEFAULTS.items():
+            movie.setdefault(key, copy.deepcopy(value))
+        if (not isinstance(movie.get("id"), str) or not movie["id"]
+                or movie["id"] in movie_ids or movie["id"] in seen):
+            raise ValueError("Every movie needs a unique ID")
+        movie_ids.add(movie["id"])
+        if not isinstance(movie.get("name"), str) or not movie["name"].strip():
+            raise ValueError("Every movie needs a title")
+        _whole(movie.get("year"), "year", 1880)
+        _whole(movie["min_seeders"], "min_seeders", 0)
+        for key in ("enabled", "remove_when_done", "done"):
+            if type(movie[key]) is not bool:
+                raise ValueError(f"{key} must be true or false")
+        for key in ("quality", "save_path"):
+            if not isinstance(movie[key], str):
+                raise ValueError(f"{key} must be text")
+        if not isinstance(movie["must_not_contain"], list) or not all(isinstance(word, str) for word in movie["must_not_contain"]):
+            raise ValueError("must_not_contain must be a list of words")
     record_ids = set()
     for record in result["downloads"]:
         if not isinstance(record, dict) or not isinstance(record.get("id"), str) or not record["id"] or record["id"] in record_ids:
             raise ValueError("Every download needs a unique ID")
         record_ids.add(record["id"])
-        if record.get("series_id") not in seen:
+        # Each download belongs to exactly one series or one movie.
+        if ("series_id" in record) == ("movie_id" in record):
+            raise ValueError("Download must belong to one series or one movie")
+        if "series_id" in record and record["series_id"] not in seen:
             raise ValueError("Download refers to an unknown series")
+        if "movie_id" in record and record["movie_id"] not in movie_ids:
+            raise ValueError("Download refers to an unknown movie")
         for key in ("season", "episode"):
             if key not in record:
                 raise ValueError(f"Download {key} is missing")
@@ -165,10 +210,16 @@ def upgrade_config(raw):
     if not isinstance(raw, dict):
         raise ValueError("series.json must contain an object")
     version = raw.get("schema_version", 1)
-    if type(version) is not int or version not in (1, SCHEMA_VERSION):
+    if type(version) is not int or version not in (1, 2, SCHEMA_VERSION):
         raise ValueError(f"Unsupported series.json schema version: {version}")
     if version == SCHEMA_VERSION:
         return validate(raw)
+    if version == 2:
+        # Version 3 only adds the movie list; everything else carries over.
+        config = copy.deepcopy(raw)
+        config["schema_version"] = SCHEMA_VERSION
+        config.setdefault("movies", [])
+        return validate(config)
     config = empty_config()
     config.update(copy.deepcopy(raw))
     config["schema_version"] = SCHEMA_VERSION
@@ -246,10 +297,11 @@ class ConfigStore:
     def _load_locked(self):
         raw = self._read()
         config = upgrade_config(raw)
-        if raw.get("schema_version", 1) != SCHEMA_VERSION:
-            backup = self.path.with_name(self.path.name + ".v1.bak")
+        old_version = raw.get("schema_version", 1)
+        if old_version != SCHEMA_VERSION:
+            backup = self.path.with_name(f"{self.path.name}.v{old_version}.bak")
             if backup.exists():
-                backup = self.path.with_name(f"{self.path.name}.v1.{time.time_ns()}.bak")
+                backup = self.path.with_name(f"{self.path.name}.v{old_version}.{time.time_ns()}.bak")
             with backup.open("xb") as target:
                 target.write(self.path.read_bytes())
             self._save(config)
@@ -317,11 +369,12 @@ class ConfigStore:
     def remove_series(self, series_id):
         def remove(config):
             config["series"] = [s for s in config["series"] if s["id"] != series_id]
-            config["downloads"] = [d for d in config["downloads"] if d["series_id"] != series_id]
+            config["downloads"] = [d for d in config["downloads"] if d.get("series_id") != series_id]
         return self.update(remove)
 
     def set_setting(self, key, value):
-        if key not in ("max_downloads", "autostart", "qbittorrent_url", "search_timeout_seconds"):
+        if key not in ("max_downloads", "autostart", "qbittorrent_url", "search_timeout_seconds",
+                       "movie_folder"):
             raise ValueError(f"Unknown setting: {key}")
         return self.update(lambda config: config.__setitem__(key, value))
 
@@ -344,14 +397,14 @@ class ConfigStore:
             if torrent_hash:
                 fresh["hash"] = torrent_hash.lower()
             existing = next((d for d in config["downloads"]
-                             if d["series_id"] == show["id"] and d["season"] == fresh["season"]
+                             if d.get("series_id") == show["id"] and d["season"] == fresh["season"]
                              and d["episode"] == fresh["episode"]
                              and d.get("hash", "").lower() == fresh.get("hash", "")), None)
             if existing is None and torrent_hash:
                 # Older observed records did not store identity. Enrich a
                 # matching record rather than adding a second history row.
                 existing = next((d for d in config["downloads"]
-                                 if d["series_id"] == show["id"] and d["season"] == fresh["season"]
+                                 if d.get("series_id") == show["id"] and d["season"] == fresh["season"]
                                  and d["episode"] == fresh["episode"] and not d.get("hash")
                                  and normalize(d["title"]) == normalize(fresh["title"])), None)
             if existing is None:
@@ -371,3 +424,64 @@ class ConfigStore:
                 if record["id"] in record_ids:
                     record["status"] = "removed"
         return self.update(mark)
+
+    # ---- movies --------------------------------------------------------------
+
+    def current_movie(self, movie_id):
+        return next((movie for movie in self.load()["movies"] if movie["id"] == movie_id), None)
+
+    def add_movie(self, fields):
+        movie = {key: copy.deepcopy(value) for key, value in fields.items() if key in MOVIE_FIELDS}
+        movie["id"] = uuid.uuid4().hex
+        def add(config):
+            if any(same_movie(movie, other) for other in config["movies"]):
+                raise ValueError("This movie is already in the list")
+            config["movies"].append(movie)
+        self.update(add)
+        return movie["id"]
+
+    def edit_movie(self, movie_id, changes):
+        fields = {key: copy.deepcopy(value) for key, value in changes.items() if key in MOVIE_FIELDS}
+        def edit(config):
+            entry = next((m for m in config["movies"] if m["id"] == movie_id), None)
+            if entry is None:
+                raise ValueError("This movie was removed")
+            entry.update(fields)
+            if any(m["id"] != movie_id and same_movie(entry, m) for m in config["movies"]):
+                raise ValueError("This movie is already in the list")
+        return self.update(edit)
+
+    def toggle_movie(self, movie_id):
+        def toggle(config):
+            for entry in config["movies"]:
+                if entry["id"] == movie_id:
+                    entry["enabled"] = not entry["enabled"]
+        return self.update(toggle)
+
+    def remove_movie(self, movie_id):
+        def remove(config):
+            config["movies"] = [m for m in config["movies"] if m["id"] != movie_id]
+            config["downloads"] = [d for d in config["downloads"] if d.get("movie_id") != movie_id]
+        return self.update(remove)
+
+    def record_movie(self, movie, title, torrent_hash=None, *, managed=True):
+        """Record the movie's download and mark it done, so it is not searched again."""
+        managed = bool(torrent_hash) and managed
+        def record(config):
+            entry = next((m for m in config["movies"] if m["id"] == movie["id"]), None)
+            if entry is None:
+                return  # removed meanwhile; do not bring it back
+            fresh = dict(id=uuid.uuid4().hex, movie_id=movie["id"], season=None, episode=None,
+                         title=title or "", added=f"{datetime.now():%Y-%m-%d %H:%M}",
+                         managed=managed, status="added" if managed else "observed")
+            if torrent_hash:
+                fresh["hash"] = torrent_hash.lower()
+            existing = next((d for d in config["downloads"] if d.get("movie_id") == movie["id"]
+                             and torrent_hash and d.get("hash", "").lower() == fresh["hash"]), None)
+            if existing is None:
+                config["downloads"].append(fresh)
+            elif managed:
+                fresh["id"] = existing["id"]
+                existing.update(fresh)
+            entry["done"] = True
+        return self.update(record)

@@ -4,6 +4,16 @@ import base64
 import re
 
 COUNTRY_TAGS = {"us", "uk", "au", "ca", "nz"}
+# Words a release name may use for a quality. 4K releases are named either way.
+QUALITY_ALIASES = {"2160p": {"2160p", "4k", "uhd"}}
+
+
+def quality_matches(quality, words):
+    """True if the release words carry the wanted quality ("" means any)."""
+    quality = normalize(quality)
+    if not quality:
+        return True
+    return bool(QUALITY_ALIASES.get(quality, {quality}) & set(words))
 
 
 def normalize(text):
@@ -118,7 +128,7 @@ def pick_candidates(results, show):
         # The show name must come before the episode tag.
         if not name_matches(show, title[: tag.start()]):
             continue
-        if quality and quality not in title.split():
+        if not quality_matches(quality, title.split()):
             continue
         if banned & set(title.split()):
             continue
@@ -133,3 +143,46 @@ def pick_best(results, show):
     """Return the best result for the show's next episode, or None."""
     candidates = pick_candidates(results, show)
     return candidates[0] if candidates else None
+
+
+def movie_title_matches(movie, title):
+    """True if a normalized release title is this movie: its name, then its year.
+
+    The year is required and the words before it must be the movie's name,
+    so "Dune 2021" never matches "Dune 1984" or "Dune Part Two 2024".
+    A title that is itself a number ("1917 2019") works too, because every
+    place the year appears is tried.
+    """
+    words = title.split()
+    year = str(movie["year"])
+    for index, word in enumerate(words):
+        if word == year and index > 0 and name_matches(
+                {"name": movie["name"]}, " ".join(words[:index])):
+            return True
+    return False
+
+
+def find_movie(torrents, movie):
+    """Return the torrents from the list that are this movie."""
+    return [t for t in torrents if movie_title_matches(movie, normalize(t["name"]))]
+
+
+def pick_movie_candidates(results, movie):
+    """Return search results that are this movie, best first."""
+    banned = {normalize(w) for w in movie.get("must_not_contain", [])}
+    candidates = []
+    for row in results:
+        title = normalize(row.get("fileName", ""))
+        words = title.split()
+        if not row.get("fileUrl", "").startswith(("magnet:", "http://", "https://")):
+            continue
+        if not movie_title_matches(movie, title):
+            continue
+        if not quality_matches(movie.get("quality", ""), words):
+            continue
+        if banned & set(words):
+            continue
+        if row.get("nbSeeders", 0) < movie.get("min_seeders", 1):
+            continue
+        candidates.append(row)
+    return sorted(candidates, key=lambda r: r.get("nbSeeders", 0), reverse=True)

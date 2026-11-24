@@ -31,6 +31,48 @@ class WindowTests(unittest.TestCase):
             self.skipTest(f"Tk display unavailable: {error}")
         self.addCleanup(self.app.destroy)
 
+    def test_movies_tab_lists_movies_and_drives_the_toolbar(self):
+        self.store.set_setting("movie_folder", r"C:\Media\Filmid")
+        movie_id = self.store.add_movie(dict(name="Example Movie", year=2025, quality="2160p"))
+        self.app.refresh(force=True)
+        self.app.upper.select(1)
+        self.app.update()
+        self.assertTrue(self.app.movies_shown())
+        self.assertEqual(self.app.add_button.cget("text"), "Add movie…")
+        self.assertEqual(self.app.movie_table.item(movie_id, "values")[:4],
+                         ("Example Movie", "2025", "4K (2160p)", "Waiting"))
+        self.assertEqual(self.app.movie_folder.get(), r"C:\Media\Filmid")
+        self.assertEqual(self.app.movie_table.item(movie_id, "values")[4],
+                         r"C:\Media\Filmid\Example Movie (2025)")
+        self.app.movie_table.selection_set(movie_id)
+        self.app.update()
+        self.app.toggle()
+        self.assertFalse(self.store.current_movie(movie_id)["enabled"])
+        self.assertEqual(self.app.movie_table.item(movie_id, "values")[3], "Paused")
+        self.assertEqual(self.app.pause_button.cget("text"), "Resume")
+        with patch.object(gui, "MovieDialog") as dialog, patch.object(self.app, "wait_window"):
+            dialog.return_value.result = dict(name="Example Movie", year=2025, quality="1080p",
+                                              done=True)
+            self.app.edit()
+        self.assertEqual(self.app.movie_table.item(movie_id, "values")[2:4], ("1080p", "Downloaded"))
+        self.app.upper.select(0)
+        self.app.update()
+        self.assertEqual(self.app.add_button.cget("text"), "Add series…")
+        self.assertEqual(self.store.current_entry(self.series_id)["enabled"], True)
+
+    def test_movie_folder_box_saves_the_default_folder(self):
+        self.app.movie_folder.set(r"C:\Media\Filmid")
+        self.app.movie_folder_changed()
+        self.assertEqual(self.store.load()["movie_folder"], r"C:\Media\Filmid")
+
+    def test_series_dialog_offers_4k(self):
+        dialog = gui.SeriesDialog(self.app)
+        self.addCleanup(lambda: dialog.winfo_exists() and dialog.destroy())
+        dialog.name.set("Example Show 2")
+        dialog.quality.set("4K (2160p)")
+        dialog.save()
+        self.assertEqual(dialog.result["quality"], "2160p")
+
     def test_table_and_history_follow_stable_id_across_seasons(self):
         show = self.store.current_entry(self.series_id)
         self.store.record_download(show, "season one", "one")
@@ -208,7 +250,7 @@ class WindowCommandTests(unittest.TestCase):
         def wait(dialog):
             self.store.record_download(old, "episode one", "one")
         app = SimpleNamespace(store=self.store, selected=lambda: old, wait_window=wait,
-                              refresh=Mock())
+                              refresh=Mock(), movies_shown=lambda: False)
         app.change = lambda command: gui.App.change(app, command)
         with patch.object(gui, "SeriesDialog", return_value=SimpleNamespace(result=result)):
             gui.App.edit(app)
@@ -225,7 +267,8 @@ class WindowCommandTests(unittest.TestCase):
         history = Mock()
         history.get_children.return_value = ()
         app = SimpleNamespace(selected=lambda: second, downloads=self.store.load()["downloads"],
-                              history=history, edit_button=Mock(), pause_button=Mock(), remove_button=Mock())
+                              history=history, edit_button=Mock(), pause_button=Mock(), remove_button=Mock(),
+                              add_button=Mock(), movies_shown=lambda: False)
         gui.App.selection_changed(app)
         labels = {call.kwargs["values"][0] for call in history.insert.call_args_list}
         self.assertEqual(labels, {"S01E01", "S02E01"})

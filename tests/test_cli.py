@@ -39,7 +39,7 @@ class CliTests(unittest.TestCase):
             output = io.StringIO()
             with patch.object(watcher, "WatcherEngine", return_value=engine), contextlib.redirect_stdout(output):
                 self.assertEqual(watcher.main(["--dry-run"]), 0)
-            self.assertIn("No series to watch", output.getvalue())
+            self.assertIn("No series or movies to watch", output.getvalue())
             self.assertFalse(store.path.exists())
 
     def test_subprocess_uses_explicit_store_path(self):
@@ -49,7 +49,7 @@ class CliTests(unittest.TestCase):
                        "--config", str(path), "--dry-run"]
             result = subprocess.run(command, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("No series to watch", result.stdout)
+            self.assertIn("No series or movies to watch", result.stdout)
             self.assertFalse(path.exists())
 
     def test_schedule_preserves_absolute_config_path_with_spaces(self):
