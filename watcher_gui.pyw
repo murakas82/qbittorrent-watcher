@@ -342,6 +342,18 @@ def set_autostart(on):
                 pass
 
 
+def autostart_registered():
+    """True if Windows is set to start the watcher at sign-in."""
+    if winreg is None:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            winreg.QueryValueEx(key, RUN_NAME)
+        return True
+    except OSError:
+        return False
+
+
 class App(tk.Tk):
     def __init__(self, background=False, standalone=True, store=None):
         """background: start hidden. standalone=False (tests) skips autostart,
@@ -485,16 +497,19 @@ class App(tk.Tk):
         try:
             config = self.store.load()
         except (OSError, ValueError):
-            config = {}
-        # On the very first start, switch autostart on; after that, respect it.
-        wanted = config.get("autostart", True)
-        try:
-            set_autostart(wanted)  # also refreshes the path if the folder moved
-        except OSError:
-            wanted = False
-        self.autostart.set(wanted)
-        if "autostart" not in config:
-            self.remember_autostart(wanted)
+            # The saved choice is unknown, so change nothing: show what
+            # Windows has now, and leave both it and the list alone.
+            self.autostart.set(autostart_registered())
+        else:
+            # On the very first start, switch autostart on; after that, respect it.
+            wanted = config.get("autostart", True)
+            try:
+                set_autostart(wanted)  # also refreshes the path if the folder moved
+            except OSError:
+                wanted = False
+            self.autostart.set(wanted)
+            if "autostart" not in config:
+                self.remember_autostart(wanted)
 
         try:
             server = socket.socket()
@@ -722,7 +737,8 @@ class App(tk.Tk):
                 dialog = MovieDialog(self, movie, default_folder=self.saved_movie_folder)
                 self.wait_window(dialog)
                 if dialog.result:
-                    self.change(lambda: self.store.edit_movie(movie["id"], dialog.result))
+                    self.change(lambda: self.store.edit_movie(movie["id"], dialog.result,
+                                                              original=movie))
             return
         old = self.selected()
         if not old:

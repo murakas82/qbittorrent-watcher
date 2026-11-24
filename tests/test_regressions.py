@@ -32,7 +32,7 @@ class FakeQB:
         return self.search_plugins_enabled
 
     def search(self, pattern, timeout):
-        return [dict(fileName=pattern + ".1080p", fileUrl="magnet:?xt=" + str(i),
+        return [dict(fileName=pattern + ".1080p", fileUrl="magnet:?xt=urn:btih:" + f"{i:040x}",
                      nbSeeders=10 - i) for i in range(3)]
 
     def add(self, row, path):

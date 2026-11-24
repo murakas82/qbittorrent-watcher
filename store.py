@@ -440,8 +440,12 @@ class ConfigStore:
         self.update(add)
         return movie["id"]
 
-    def edit_movie(self, movie_id, changes):
+    def edit_movie(self, movie_id, changes, original=None):
         fields = {key: copy.deepcopy(value) for key, value in changes.items() if key in MOVIE_FIELDS}
+        # A dialog shows "Downloaded" as it was when it opened. A check may
+        # have downloaded the movie since, so only write it if it was changed.
+        if original is not None and fields.get("done") == original.get("done"):
+            fields.pop("done", None)
         def edit(config):
             entry = next((m for m in config["movies"] if m["id"] == movie_id), None)
             if entry is None:
@@ -483,5 +487,8 @@ class ConfigStore:
             elif managed:
                 fresh["id"] = existing["id"]
                 existing.update(fresh)
-            entry["done"] = True
+            # If the title or year was changed while this was being added, the
+            # download is for the old movie: the new one is still wanted.
+            if same_movie(entry, movie):
+                entry["done"] = True
         return self.update(record)

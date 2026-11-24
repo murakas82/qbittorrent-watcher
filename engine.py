@@ -6,8 +6,8 @@ import time
 import urllib.error
 from datetime import datetime
 
-from matching import (find_episode, find_movie, magnet_hash, pick_candidates,
-                      pick_movie_candidates)
+from matching import (find_episode, find_movie, magnet_ids, pick_candidates,
+                      pick_movie_candidates, torrent_matches_ids)
 from qb_client import (SEARCH_PLUGIN_HELP, NoSearchPluginsError, QBittorrent,
                        apply_download_limit)
 from store import ConfigStore, FileLock
@@ -42,7 +42,7 @@ def wait_for_added(qb, row, show, known, tag=None):
     torrent names need not equal the search result's title. Untagged torrents
     are never accepted as confirmation of a page-link submission.
     """
-    expected = magnet_hash(row.get("fileUrl", ""))
+    expected = magnet_ids(row.get("fileUrl", ""))
     if not expected and not tag:
         return None, False
     known = {torrent_hash.lower() for torrent_hash in known}
@@ -51,8 +51,8 @@ def wait_for_added(qb, row, show, known, tag=None):
         torrents = qb.torrents()
         if expected:
             for torrent in torrents:
-                if torrent.get("hash", "").lower() == expected:
-                    return torrent, expected not in known
+                if torrent_matches_ids(torrent, expected):
+                    return torrent, torrent.get("hash", "").lower() not in known
         elif tag:
             for torrent in torrents:
                 tags = {value.strip() for value in torrent.get("tags", "").split(",")}
@@ -62,6 +62,20 @@ def wait_for_added(qb, row, show, known, tag=None):
         if time.monotonic() >= deadline:
             return None, False
         time.sleep(3)
+
+
+def watcher_tag(torrent):
+    """The watcher's own submission tag on a torrent, or None.
+
+    Only the watcher creates "watcher-<random>" tags, one per submission, so a
+    torrent carrying one is certainly the watcher's, even if it turned up
+    after the confirmation wait or its progress could not be saved then.
+    """
+    for tag in str(torrent.get("tags", "")).split(","):
+        tag = tag.strip()
+        if tag.startswith("watcher-"):
+            return tag
+    return None
 
 
 def search_episode(qb, show, timeout):
@@ -155,10 +169,17 @@ class WatcherEngine:
         finally:
             lock.release()
 
-    def movie_unchanged(self, movie):
-        current = self.store.current_movie(movie["id"])
+    def movie_unchanged(self, movie, destination=None):
+        """True if the movie is still wanted as it was when its search started.
+
+        With `destination`, also true only if the movie would still go there,
+        so a movie folder changed during the search is not ignored.
+        """
+        config = self.store.load()
+        current = next((m for m in config["movies"] if m["id"] == movie["id"]), None)
         return (current is not None and current["enabled"] and not current["done"] and
-                all(current.get(key) == movie.get(key) for key in MOVIE_SETTINGS))
+                all(current.get(key) == movie.get(key) for key in MOVIE_SETTINGS) and
+                (destination is None or movie_destination(current, config) == destination))
 
     def unchanged(self, show):
         current = self.store.current_entry(show["id"])
@@ -326,6 +347,8 @@ class WatcherEngine:
                 if already_there:
                     got_title = already_there["name"]
                     got_hash = already_there.get("hash")
+                    add_tag = watcher_tag(already_there)
+                    got_managed = add_tag is not None
                     self.log(f"{label}: already in qBittorrent, skipping")
                 else:
                     candidates = pick_candidates(results, show)
@@ -354,6 +377,7 @@ class WatcherEngine:
                         if appeared:
                             got_title = appeared["name"]
                             got_hash = appeared.get("hash")
+                            got_managed = ours  # true only for the watcher's own tag
                             self.log(f"{label}: appeared in qBittorrent during the search, not adding")
                         elif not added:
                             break
@@ -407,7 +431,15 @@ class WatcherEngine:
                 present = qb.torrents()
                 by_hand = find_existing(present)
                 if by_hand:
-                    return "appeared", by_hand[0], False, None
+                    tag = watcher_tag(by_hand[0])
+                    return "appeared", by_hand[0], tag is not None, tag
+                url = row.get("fileUrl", "")
+                if url.startswith("magnet:") and not magnet_ids(url):
+                    # Its torrent could never be confirmed, and an unconfirmed
+                    # add would be followed by the next release: the same item
+                    # downloaded more than once. Skip it instead.
+                    self.log(f"{label}: skipped a magnet link without a readable torrent ID: {summary}")
+                    continue
                 known = {t.get("hash", "").lower() for t in present}
                 add_tag = (qb.add(row, folder, content_layout) if content_layout
                            else qb.add(row, folder))
@@ -447,6 +479,8 @@ class WatcherEngine:
         title, torrent_hash, managed, add_tag = None, None, False, None
         if existing:
             title, torrent_hash = existing[0]["name"], existing[0].get("hash")
+            add_tag = watcher_tag(existing[0])
+            managed = add_tag is not None
             self.log(f"{label}: already in qBittorrent, marking as downloaded")
         else:
             candidates = pick_movie_candidates(results, movie)
@@ -457,17 +491,19 @@ class WatcherEngine:
                 best = candidates[0]
                 self.log(f"{label}: would add {best['fileName']} ({best.get('nbSeeders', 0)} seeders)")
                 return None
+            # The search can take a minute: use the movie folder as it is now.
+            folder, layout = movie_destination(movie, self.store.load())
             outcome, torrent, ours, add_tag = self.try_add(
                 qb, candidates, label, folder,
                 lambda torrents: find_movie(torrents, movie),
-                lambda: self.movie_unchanged(movie), layout)
+                lambda: self.movie_unchanged(movie, (folder, layout)), layout)
             if outcome == "edited":
                 self.log(f"{label}: movie was changed in the window, leaving it for the next check")
                 return None
             if outcome == "failed":
                 return None
             title, torrent_hash = torrent["name"], torrent.get("hash")
-            managed = outcome == "added" and ours
+            managed = ours
             if outcome == "appeared":
                 self.log(f"{label}: appeared in qBittorrent during the search, not adding")
         if dry_run:
